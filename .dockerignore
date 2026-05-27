@@ -1,0 +1,45 @@
+# Git
+.git/
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Environment files (use .env.docker in compose)
+.env
+.env.example
+.env.docker
+!.env.docker.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (don't bake data into image)
+data/
+logs/
+*.log
+*.sql
+*.csv
+
+# Training artifacts (except final model)
+training/checkpoints/
+models/*.tmp
+
+# Documentation
+README.md
+README_PIPELINE.md

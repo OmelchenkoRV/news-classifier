@@ -31,10 +31,13 @@ logger = logging.getLogger(__name__)
 MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 
 # Impact scores for computing news_impact_score
-IMPACT_WEIGHT = {"noise": 0.0, "low": 0.2, "medium": 0.5, "high": 1.0}
+IMPACT_WEIGHT = {"noise": 0.0, "low": 0.2, "medium": 0.5, "high": 1.0, "during_event": 0.3}
 
 # Categories that should tighten trading gates (non-crypto-native catalysts)
 TIGHTEN_CATEGORIES = {"geopolitical", "macro", "regulatory"}
+
+# Categories that are reactive — headline describes an existing move
+REACTIVE_CATEGORIES = {"technical_analysis", "price_commentary", "opinion", "promotion"}
 
 
 class HeadlineClassifierInference:
@@ -52,7 +55,7 @@ class HeadlineClassifierInference:
             )
 
         # Load model
-        from training.train_classifier import HeadlineClassifier
+        from training.train_classifier_v2 import HeadlineClassifier
 
         checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
         self.impact_labels = checkpoint["impact_labels"]
@@ -100,17 +103,23 @@ class HeadlineClassifierInference:
         cat_conf = float(cat_probs[cat_idx])
 
         # Compute news_impact_score for pipeline integration
-        # Magnitude from impact level, sign from whether it's constructive
         magnitude = IMPACT_WEIGHT.get(impact_level, 0.0) * impact_conf
-        # For now, we don't predict direction (bullish/bearish) —
-        # we just flag magnitude. Direction comes from price action.
+        is_reactive = category in REACTIVE_CATEGORIES
+
+        # Reactive headlines get zero impact score regardless of timing
+        if is_reactive:
+            magnitude = 0.0
+
         news_impact_score = magnitude
 
         # Should the capture gate tighten?
+        # Rely on category prediction (reliable at ~85% F1) rather than
+        # impact level prediction (unreliable — impact depends on market
+        # conditions not visible in the headline text).
         should_tighten = (
             category in TIGHTEN_CATEGORIES
-            and impact_level in ("high", "medium")
-            and impact_conf > 0.6
+            and cat_conf > 0.6
+            and not is_reactive
         )
 
         return {
@@ -118,6 +127,7 @@ class HeadlineClassifierInference:
             "impact_confidence": round(impact_conf, 3),
             "category": category,
             "category_confidence": round(cat_conf, 3),
+            "is_causal": not is_reactive,
             "news_impact_score": round(news_impact_score, 3),
             "should_tighten_gates": should_tighten,
         }

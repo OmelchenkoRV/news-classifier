@@ -1,0 +1,29 @@
+# Dockerfile.capture — ETH snapshot capture service
+# ====================================================
+# Lightweight container that polls public APIs every 5 min and writes
+# to the same PostgreSQL the news classifier uses.
+
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install only what this service needs — much smaller than the classifier image
+RUN pip install --no-cache-dir \
+    psycopg2-binary==2.9.9 \
+    requests==2.31.0 \
+    python-dotenv>=1.0 \
+    spacy~=3.8.14
+
+# Copy only what's needed
+COPY config/database.py ./config/
+COPY config/__init__.py ./config/
+COPY capture/ ./capture/
+
+ENV CAPTURE_INTERVAL_SECONDS=300
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "-m", "capture.snapshot", "--continuous"]

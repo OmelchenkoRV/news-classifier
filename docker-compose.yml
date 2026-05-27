@@ -1,0 +1,294 @@
+# docker-compose.yml for news-classifier live pipeline
+# =====================================================
+#
+# Services:
+#   news-classifier  — main live pipeline (RSS poll → classify → trigger → alert)
+#   outcomes-worker  — Phase 5 worker; resolves trigger outcomes from price_snapshots
+#   eth-capture      — pre-breakout snapshot pipeline (separate Dockerfile)
+#
+# Usage:
+#   docker compose up -d         # start all in background
+#   docker compose logs -f       # tail all logs
+#   docker compose logs -f news-classifier outcomes-worker
+#                                # tail just the live pipeline + worker
+#   docker compose stop          # graceful shutdown
+#   docker compose down          # stop and remove
+#   docker compose build         # rebuild after code changes
+#
+# Prerequisites:
+#   1. PostgreSQL running on host machine
+#   2. .env file with DB_HOST=host.docker.internal (see .env.docker)
+#   3. Trained model in ./models/headline_classifier.pt
+
+services:
+  news-classifier:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: news-classifier:v2
+    container_name: news-classifier-live
+    restart: unless-stopped
+
+    env_file:
+      - .env.docker
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+    volumes:
+      - ./logs:/app/logs
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "10"
+
+  # ─────────────────────────────────────────────────────────────────
+  # Outcomes worker (Phase 5)
+  # Resolves pending trigger_outcomes by joining price_snapshots at
+  # trigger fire time + horizon. Idempotent and stateless; safe to
+  # run alongside live.py against the same database.
+  # Same image as news-classifier — different command. The migration
+  # entrypoint runs harmlessly here too (idempotent).
+  # ─────────────────────────────────────────────────────────────────
+  outcomes-worker:
+    image: news-classifier:v2
+    container_name: news-classifier-outcomes-worker
+    restart: unless-stopped
+    depends_on:
+      - news-classifier        # for build ordering, not runtime sequencing
+
+    command: ["python", "-m", "scripts.outcomes_worker", "--loop", "--interval", "60"]
+
+    env_file:
+      - .env.docker
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # Worker is light — mostly idle waiting on the polling interval.
+    # Bumps to higher CPU only briefly when draining a backfill backlog.
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+
+    # The worker doesn't load the classifier — disable the inherited
+    # healthcheck which tries to instantiate it.
+    healthcheck:
+      disable: true
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "5"
+
+  # ─────────────────────────────────────────────────────────────────
+  # Price backfill cron
+  # Pulls hourly OHLCV from Binance into price_snapshots so the
+  # outcomes worker has fresh price data to resolve trigger outcomes
+  # against. Without this service, price_snapshots only updates when
+  # someone runs `python -m collectors.price_backfill` manually, and
+  # the outcomes pipeline silently stalls a few hours after last
+  # invocation.
+  #
+  # Implementation: shell loop calling price_backfill once an hour.
+  # `--months 1` re-fetches the last 30 days each invocation; the
+  # collector uses ON CONFLICT DO NOTHING so re-fetching candles that
+  # already exist is idempotent and cheap (~few seconds, ~30 API calls).
+  # The 30-day overlap is deliberate — gives room to recover from any
+  # gap up to a month without manual intervention.
+  #
+  # Why not Python? A loop-with-sleep daemon would be marginally
+  # cleaner but adds a file to maintain. The shell loop here is two
+  # lines that anyone reading the compose file can understand.
+  # ─────────────────────────────────────────────────────────────────
+  price-backfill:
+    image: news-classifier:v2
+    container_name: news-classifier-price-backfill
+    restart: unless-stopped
+    depends_on:
+      - news-classifier
+
+    # Override entrypoint — we don't need migrations every hour.
+    # Just go straight to the backfill loop.
+    entrypoint: []
+    command: >
+      sh -c "while true; do
+               echo '[price-backfill] Starting cycle';
+               python -m collectors.price_backfill --months 1 || echo '[price-backfill] failed, will retry next cycle';
+               echo '[price-backfill] Cycle done; sleeping 1h';
+               sleep 3600;
+             done"
+
+    env_file:
+      - .env.docker
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # Lightweight — Binance API + a few thousand row inserts per cycle.
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.05'
+          memory: 64M
+
+    # No classifier load needed; disable the inherited healthcheck.
+    healthcheck:
+      disable: true
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "5"
+
+  # ─────────────────────────────────────────────────────────────────
+  # Calibration history cron
+  # Runs forecaster calibration daily across the four configurations
+  # we care about (signature_root × category) × (return_pct ×
+  # excess_return_pct), persisting per-run and per-cell results to
+  # calibration_runs and calibration_cells. This is diagnostic
+  # infrastructure for tracking how prior validity evolves as forward
+  # data accumulates.
+  #
+  # Calibration on the same dataset gives the same answer; the value
+  # of running it daily comes from forward collection adding new
+  # outcomes between runs. Once a cell stabilizes above 60% sign-
+  # agreement on detrended data across multiple runs, that's where
+  # genuine signal lives.
+  #
+  # WHEN THE CALIBRATION PHASE OF THE PROJECT ENDS, THIS SERVICE AND
+  # ITS TABLES SHOULD BE DELETED. Steps:
+  #   1. docker compose stop calibration-history
+  #   2. Remove this service block from docker-compose.yml
+  #   3. python -m config.migrate_calibration_history --drop
+  #
+  # The tables are diagnostic, not operational — they don't feed into
+  # alerts, outcomes, or any production data path.
+  #
+  # Runs daily at startup, then every 24 hours. If the container
+  # restarts (e.g., from a host reboot), the next cycle runs
+  # immediately rather than waiting a full day. That's fine — the
+  # results are idempotent in the sense that they capture a snapshot
+  # of the data at the moment of the run; rapid back-to-back runs
+  # just produce nearly-identical rows.
+  # ─────────────────────────────────────────────────────────────────
+  calibration-history:
+    image: news-classifier:v2
+    container_name: news-classifier-calibration-history
+    restart: unless-stopped
+    depends_on:
+      - news-classifier
+
+    # Skip migrations — entrypoint would re-run the full set every
+    # cycle. The main news-classifier service already runs them.
+    #
+    # Command structure: a sh -c "..." running a daily loop. Inside,
+    # nested for loops cover the four (aggregate_by × metric) variants.
+    # Notes:
+    #   - YAML folded-scalar (>) flattens newlines to spaces, so don't
+    #     use shell line continuations (\) — they become literal "\ ".
+    #     Statements separated by ; instead.
+    #   - Avoid $(date) inside the YAML — compose tries to interpolate
+    #     $(...) as if it were a variable. Hardcode 'daily cron' as
+    #     the notes; date is in run_at anyway.
+    #   - $$agg / $$metric escape the $ so compose doesn't try to
+    #     resolve them as docker variables; the running shell sees
+    #     them as $agg / $metric.
+    entrypoint: []
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          echo "[calibration-history] Starting cycle";
+          for agg in signature_root category; do
+            for metric in return_pct excess_return_pct; do
+              echo "[calibration-history] Running --aggregate-by $$agg --metric $$metric";
+              python -m scripts.calibrate_forecaster --aggregate-by "$$agg" --metric "$$metric" --store --quiet --notes "daily cron" || echo "[calibration-history] Run failed; will retry next cycle";
+            done;
+          done;
+          echo "[calibration-history] Cycle done; sleeping 24h";
+          sleep 86400;
+        done
+
+    env_file:
+      - .env.docker
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.05'
+          memory: 64M
+
+    healthcheck:
+      disable: true
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "5"
+
+  # ─────────────────────────────────────────────────────────────────
+  # ETH Snapshot Capture
+  # Pre-breakout data capture: spot, orderbook, derivatives, options.
+  # Lightweight — uses public APIs only, no model required.
+  # ─────────────────────────────────────────────────────────────────
+  eth-capture:
+    build:
+      context: .
+      dockerfile: Dockerfile.capture
+    image: eth-capture:v1
+    container_name: eth-capture
+    restart: unless-stopped
+
+    env_file:
+      - .env.docker
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    environment:
+      - CAPTURE_INTERVAL_SECONDS=300
+
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "5"

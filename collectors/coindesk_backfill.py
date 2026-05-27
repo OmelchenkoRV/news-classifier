@@ -222,9 +222,11 @@ def backfill(months: int = 12, dry_run: bool = False):
                     f"total new: {total_new}/{total_fetched}"
                 )
 
-            # Safety: don't burn too many calls
+            # Safety: don't burn too many lifetime calls
+            # At 50 articles/call, 5000 calls = 250k articles = ~3 years
+            # Your lifetime budget is 250k calls — this uses at most 2%
             if api_calls >= 5000:
-                logger.warning("Reached 500 API call safety limit, stopping.")
+                logger.warning("Reached 5000 API call safety limit, stopping.")
                 break
 
     except KeyboardInterrupt:

@@ -1,0 +1,92 @@
+<svg width="680" height="620" viewBox="0 0 680 620" xmlns="http://www.w3.org/2000/svg" role="img" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+<title>news-classifier architecture</title>
+<desc>A data pipeline: RSS feeds flow through a DistilBERT classifier and spaCy directional extraction into a trigger novelty system, which both schedules outcomes and inserts alerts into Postgres. An outcomes worker resolves returns from price data, and a forecaster aggregates them back into priors that attach to future alerts.</desc>
+<style>
+.t{font-size:14px;fill:#3d3d3a}
+.ts{font-size:12px;fill:#73726c}
+.th{font-size:14px;font-weight:500;fill:#3d3d3a}
+.hd{font-size:14px;font-weight:500;fill:#3d3d3a}
+.box-gray{fill:#F1EFE8;stroke:#5F5E5A}
+.box-blue{fill:#E6F1FB;stroke:#185FA5}
+.tb-blue{fill:#0C447C}
+.box-purple{fill:#EEEDFE;stroke:#534AB7}
+.tb-purple{fill:#3C3489}
+.box-teal{fill:#E1F5EE;stroke:#0F6E56}
+.tb-teal{fill:#085041}
+.box-coral{fill:#FAECE7;stroke:#993C1D}
+.tb-coral{fill:#712B13}
+.box-amber{fill:#FAEEDA;stroke:#854F0B}
+.tb-amber{fill:#633806}
+.box-green{fill:#EAF3DE;stroke:#3B6D11}
+.tb-green{fill:#27500A}
+.arr{stroke:#73726c;stroke-width:1.5;fill:none}
+</style>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#73726c" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker>
+</defs>
+
+<text class="hd" x="40" y="28">Ingestion &amp; classification</text>
+
+<rect class="box-gray" x="40" y="44" width="150" height="56" rx="8" stroke-width="0.5"/>
+<text class="th" x="115" y="68" text-anchor="middle">RSS feeds</text>
+<text class="ts" x="115" y="86" text-anchor="middle">collect + dedup</text>
+
+<rect class="box-blue" x="250" y="44" width="170" height="56" rx="8" stroke-width="0.5"/>
+<text class="th tb-blue" x="335" y="68" text-anchor="middle">DistilBERT classifier</text>
+<text class="ts" x="335" y="86" text-anchor="middle" fill="#185FA5">category + confidence</text>
+
+<rect class="box-blue" x="480" y="44" width="160" height="56" rx="8" stroke-width="0.5"/>
+<text class="th tb-blue" x="560" y="68" text-anchor="middle">Stage 2 direction</text>
+<text class="ts" x="560" y="86" text-anchor="middle" fill="#185FA5">spaCy dep-parse</text>
+
+<line x1="190" y1="72" x2="248" y2="72" class="arr" marker-end="url(#arrow)"/>
+<line x1="420" y1="72" x2="478" y2="72" class="arr" marker-end="url(#arrow)"/>
+<line x1="560" y1="100" x2="560" y2="128" class="arr" marker-end="url(#arrow)"/>
+
+<text class="hd" x="40" y="150">Novelty &amp; routing</text>
+<text class="ts" x="40" y="172">hybrid Jaccard 0.4</text>
+
+<rect class="box-purple" x="430" y="128" width="210" height="56" rx="8" stroke-width="0.5"/>
+<text class="th tb-purple" x="535" y="152" text-anchor="middle">Trigger novelty system</text>
+<text class="ts" x="535" y="170" text-anchor="middle" fill="#534AB7">is this a NEW event?</text>
+
+<line x1="430" y1="184" x2="300" y2="232" class="arr" marker-end="url(#arrow)"/>
+<line x1="560" y1="184" x2="560" y2="232" class="arr" marker-end="url(#arrow)"/>
+
+<rect class="box-teal" x="150" y="232" width="220" height="56" rx="8" stroke-width="0.5"/>
+<text class="th tb-teal" x="260" y="256" text-anchor="middle">Schedule outcomes</text>
+<text class="ts" x="260" y="274" text-anchor="middle" fill="#0F6E56">BTC/ETH @ 1h / 4h / 24h</text>
+
+<rect class="box-coral" x="455" y="232" width="185" height="56" rx="8" stroke-width="0.5"/>
+<text class="th tb-coral" x="547" y="256" text-anchor="middle">Insert alert</text>
+<text class="ts" x="547" y="274" text-anchor="middle" fill="#993C1D">+ priors JSONB</text>
+
+<rect x="40" y="320" width="600" height="130" rx="14" fill="#F1EFE8" fill-opacity="0.5" stroke="#5F5E5A" stroke-width="0.5"/>
+<text class="hd" x="60" y="344">PostgreSQL</text>
+<text class="ts" x="60" y="362">single source of truth</text>
+
+<rect class="box-teal" x="150" y="372" width="220" height="56" rx="8" stroke-width="0.5"/>
+<text class="th tb-teal" x="260" y="396" text-anchor="middle">trigger_outcomes</text>
+<text class="ts" x="260" y="414" text-anchor="middle" fill="#0F6E56">return + excess return</text>
+
+<rect class="box-coral" x="455" y="372" width="185" height="56" rx="8" stroke-width="0.5"/>
+<text class="th tb-coral" x="547" y="396" text-anchor="middle">alerts + NOTIFY</text>
+<text class="ts" x="547" y="414" text-anchor="middle" fill="#993C1D">channel alerts_new</text>
+
+<line x1="260" y1="288" x2="260" y2="370" class="arr" marker-end="url(#arrow)"/>
+<line x1="547" y1="288" x2="547" y2="370" class="arr" marker-end="url(#arrow)"/>
+
+<text class="hd" x="40" y="490">Measurement &amp; feedback</text>
+
+<rect class="box-amber" x="150" y="506" width="220" height="56" rx="8" stroke-width="0.5"/>
+<text class="th tb-amber" x="260" y="530" text-anchor="middle">Outcomes worker</text>
+<text class="ts" x="260" y="548" text-anchor="middle" fill="#854F0B">resolve vs price data</text>
+
+<rect class="box-green" x="430" y="506" width="210" height="56" rx="8" stroke-width="0.5"/>
+<text class="th tb-green" x="535" y="530" text-anchor="middle">Forecaster</text>
+<text class="ts" x="535" y="548" text-anchor="middle" fill="#3B6D11">priors, MIN_N=5</text>
+
+<line x1="260" y1="428" x2="260" y2="504" class="arr" marker-end="url(#arrow)"/>
+<line x1="370" y1="534" x2="428" y2="534" class="arr" marker-end="url(#arrow)"/>
+<path d="M535 506 L535 472 L547 472 L547 430" class="arr" marker-end="url(#arrow)"/>
+</svg>

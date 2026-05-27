@@ -1,9 +1,43 @@
+# Runtime requirements for the live pipeline (Docker container).
+#
+# What's IN:
+#   - DB and HTTP basics (psycopg2, dotenv, requests, feedparser)
+#   - Transformers + torch (CPU-only — see Dockerfile for index URL)
+#   - spaCy and the en_core_web_sm model wheel for Stage 2
+#   - numpy (transitive but explicit; no specific version pin)
+#   - pandas, scikit-learn — see note below
+#
+# What's NOT in:
+#   - yfinance — only used by research/covid_exercise, no transitive
+#     imports at runtime. See requirements-train.txt.
+#   - pytest — test-only; in requirements-train.txt.
+#   - torch with CUDA — the Dockerfile installs torch from the CPU
+#     index, which produces a much smaller image (~750MB vs ~2.5GB)
+#     and avoids pulling NVIDIA driver libs we'll never use.
+#
+# Why pandas and scikit-learn are here despite being "training-only" in
+# spirit: the model class HeadlineClassifier lives in
+# training/train_classifier_v2.py, which imports both at module top
+# level. inference/classifier.py imports the class from there at
+# runtime, so both end up on the inference path transitively. Cleanest
+# fix would be to factor the model class out into a no-deps module
+# (e.g. inference/model.py), but that's a wider refactor; for now,
+# including these at runtime keeps things working without touching
+# unrelated code. Cost: ~150MB image size.
+#
+# When adding a new package: ask whether the live container actually
+# imports it at runtime, INCLUDING via transitive imports of training/
+# modules. If only training/research code does, it goes in
+# requirements-train.txt instead.
+
 psycopg2-binary>=2.9
 python-dotenv>=1.0
 requests>=2.31
 feedparser>=6.0
 transformers>=4.40
 torch>=2.2
-scikit-learn>=1.4
-pandas>=2.1
 numpy>=1.26
+pandas>=2.1
+scikit-learn>=1.4
+spacy>=3.0
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl

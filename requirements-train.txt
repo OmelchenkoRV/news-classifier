@@ -1,0 +1,26 @@
+# Training, research, and dev requirements.
+#
+# Install ON TOP of requirements.txt:
+#     pip install -r requirements.txt
+#     pip install -r requirements-train.txt
+#
+# What's IN:
+#   - yfinance — used by research/covid_exercise
+#   - pytest — test runner
+#
+# pandas and scikit-learn are NOT here — they're in requirements.txt
+# because the inference path transitively imports them via
+# training/train_classifier_v2.py. Until that module is refactored
+# (model class extracted to a no-deps file), both are runtime deps.
+#
+# torch is NOT pinned here because the live runtime version will satisfy
+# training too. If you need GPU acceleration for training, install the
+# CUDA-enabled torch wheel manually (see PyTorch's "Get Started" page
+# for the right command for your CUDA version) before running pip
+# install -r. That overrides the CPU-only torch from requirements.txt
+# without conflict — pip respects whatever's already installed.
+
+-r requirements.txt
+
+yfinance>=0.2.40
+pytest~=9.0.3
