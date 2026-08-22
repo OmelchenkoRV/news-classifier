@@ -172,3 +172,5 @@ project-tree.txt
 # OS cruft
 .DS_Store
 Thumbs.db
+
+collectors/.gdelt_archive_progress

@@ -1,13 +1,19 @@
 # Findings: Volatility Targeting — Risk Rescaling Works, Alpha Does Not
 
-**Status:** The project's **first structural win**, and the first result that
-does not depend on predicting anything. Volatility targeting cuts the momentum
-basket's max drawdown from **−73.5% to ~−48%**. Without a yield leg it is a
-pure risk *rescaling* (ret/vol unchanged at ~0.90). **With** yield credited on
-the idle capital the overlay creates, **all six 30%-target configs beat base
-on risk-adjusted return** (ret/vol 0.90 → 0.90–1.14 at 5% APY). Real, but the
-yield assumption is optimistic precisely where it matters most — see the
-caveats, which are load-bearing here.
+**Status:** **Substantially withdrawn.** Rerun on the survivorship-corrected
+universe, the overlay's apparent benefit does not survive. **0 of 18 configs
+improve risk-adjusted return** (3/18 did on the inflated basket), and the whole
+construction — momentum base + vol-target + yield leg — is **dominated by
+simply holding BTC** on both total and risk-adjusted return.
+
+What survives: vol targeting still cuts drawdown (15/18 configs) because that
+is a mechanical property. What does not: any claim that it *improves* the
+strategy. It compresses risk on any return stream; it cannot rescue a poor one.
+
+**A prediction failed here and is recorded below.** Before the rerun the
+expectation was stated that "the overlay's relative effect should hold, since
+vol targeting is a mechanical transform." It did not hold in the way that
+mattered.
 
 **Date:** 2026-08-22
 **Window:** 2020-11-01 → 2026-08-22 (2,121 days, 11 symbols)
@@ -169,17 +175,87 @@ tail risk. Treat 6/18 beating base as an upper bound, not a headline.
 
 ---
 
+## THE CORRECTED-UNIVERSE RERUN (2026-08-22) — the decisive test
+
+Everything above was measured on the **survivor-only** basket. Rerun on the
+extended universe (11 survivors + 9 dead tokens, including the archive-
+recovered original Terra LUNA and UST):
+
+| | survivors-only | **extended (corrected)** |
+|---|---|---|
+| hold BTC | 5.61× / 0.60 / −76.6% | 5.61× / **0.60** / −76.6% |
+| momentum base 30/5/7 | 15.40× / 0.84 / −72.0% | **6.49× / 0.46 / −90.5%** |
+| best overlay ret/vol | 0.98 | **0.38** (30%/60d) |
+| overlay maxDD, 30% block | ~−50% | −57% … −69% |
+| configs beating base ret/vol | 3/18 | **0/18** |
+| configs cutting drawdown | 14/18 | 15/18 |
+
+### The finding
+
+**Nothing beats holding BTC.** Base momentum on the corrected universe has a
+*higher* final (6.49× vs 5.61×) but **worse** risk-adjusted return (0.46 vs
+0.60) and a far worse drawdown (−90.5% vs −76.6%). Every vol-target config
+lands at ret/vol 0.01–0.38, all below BTC's 0.60 and most below half of it.
+The best cell returns 1.99× against BTC's 5.61×.
+
+The three-part construction this project built — momentum base, vol-target
+overlay, yield leg — is **dominated on both measures by buy-and-hold bitcoin**
+once the universe is corrected.
+
+### The prediction that failed, and why
+
+Stated before the rerun: *"the relative effect probably holds — vol targeting
+is a mechanical transform of whatever return stream it is given."*
+
+Half right. The **drawdown reduction did survive** (15/18 configs) — that part
+genuinely is mechanical. But the **ret/vol improvement did not** (3/18 → 0/18).
+
+The reason: on the inflated basket, scaling down a *good* return stream during
+high-vol periods removed volatility roughly in proportion to the return it
+sacrificed, so the ratio held and the yield leg pushed it above base. On the
+corrected basket the underlying stream is poor (ret/vol 0.46), and scaling a
+poor stream down just yields a smaller poor stream — CAGR collapses 37.8% →
+8–13% while drawdown only improves to −58%. **Vol targeting compresses risk on
+any return stream but cannot rescue one.** On the inflated basket that
+distinction was invisible.
+
+### Two mechanical notes
+
+- `--delist-loss 1.0` and `0.0` produce **byte-identical** output, consistent
+  with `FINDINGS_survivorship.md`: the dead tokens did their dying while still
+  trading, so the terminal-loss convention is irrelevant.
+- The **yield leg now carries a third of the return**. At 30%/60d: 9.4% CAGR
+  without it, 12.5% with. That is stablecoin carry booked as risk-free, which
+  it is not — and it is doing proportionally far more work than on the
+  inflated basket.
+
+### A bug fixed en route (worth recording)
+
+The extended run first reported `nan` for hold-BTC. Cause:
+`run_benchmark_hold` calls `closes.pct_change().dropna()`, and
+`DataFrame.dropna()` drops rows where **any** column is NaN. On a panel
+containing delisted tokens that discards nearly every row after the first
+delisting. Fixed by passing only the benchmark column.
+
+**This is the same failure family as the stale-price-backfill bug**: a
+correct-looking pipeline silently computing on a fraction of the data. Third
+occurrence in this project.
+
+---
+
 ## Caveats
 
-- **Not alpha.** Ret/vol unchanged. Read it as risk rescaling.
 - **One bear market.** Same N=1 limitation as everything in this project.
-- **SURVIVORSHIP — now MEASURED, and load-bearing (2026-08-22).** Every figure
-  in this document was computed on the **survivor-only** basket. Adding seven
-  dead tokens cuts base 30/5/7 by ~75% and drops it *below* buy-and-hold BTC
-  (`FINDINGS_survivorship.md`). The overlay's **relative** effect should
-  survive — vol targeting is a mechanical transform of whatever return stream
-  it is given — but the **absolute levels here do not**. Rerun on the corrected
-  basket before quoting any number above.
+- **Survivorship** — now measured and applied above. The corrected figures are
+  themselves imperfect: `FINDINGS_survivorship.md` shows the magnitude is not
+  identified, because adding dead tokens also changes which names rank into
+  the top-K. Treat the extended column as *indicative*, not exact.
+- **Close-to-close fills**, no intraday slippage.
+- **Vol targeting trades constantly.** Costs charge both basket turnover and
+  daily exposure changes.
+- **Stablecoin yield is not risk-free** — de-peg and protocol tail risk are
+  booked as zero, in a window (2022) containing UST's collapse and Celsius's
+  freeze.
 - **Close-to-close fills**, no intraday slippage.
 - **Vol targeting trades constantly.** Costs charge both basket turnover and
   daily exposure changes; results held at 25 bps, but a live book would face

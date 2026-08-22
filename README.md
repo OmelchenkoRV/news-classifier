@@ -28,11 +28,11 @@ strategy. Every claim below is qualified by what is actually known.
 | 7 | Funding rate — momentum (F2) | **PARTIAL, then closed** — first contiguous winning region in the project; the decisive era replicated on ETH (+17.3pp, n=33). But the largest-n era failed to replicate, and the effect **inverts at 20% drawdowns**. Flags routine volatility, not crashes | `FINDINGS_funding_defensive.md` |
 | 8 | Liquidation cascade | **NO EFFECT** — elasticity does not rise with move size (sharpest down bucket: 0.92). Deleveraging is proportional, not explosive. Depth capture also truncated | `FINDINGS_liquidation_cascade.md` |
 
-**One structural result, no prediction required:**
+**One structural result — substantially withdrawn on rerun:**
 
 | | Result | Doc |
 |---|---|---|
-| Volatility targeting | Cuts momentum drawdown **−73.5% → ~−48%**, contiguous and monotone in target vol, stable at 25bps. Ret/vol unchanged **without** a yield leg (risk rescaling, not alpha); **with** yield on idle capital, all six 30%-target configs beat base | `FINDINGS_voltarget.md` |
+| Volatility targeting | Cuts drawdown mechanically (15/18 configs) — that part is real. But rerun on the **survivorship-corrected universe**, **0/18 configs improve risk-adjusted return**, and the whole construction is **dominated by holding BTC** (0.46 vs 0.60 ret/vol). It compresses risk on any return stream; it cannot rescue a poor one | `FINDINGS_voltarget.md` |
 
 **And one self-inflicted correction:**
 
@@ -55,17 +55,21 @@ strategy. Every claim below is qualified by what is actually known.
   weeks: crowded longs → crash (June), crowded shorts → +22% rally (Aug 19),
   crowded longs → flush (Aug 22). A "crowded → DEFENSIVE" flag is right about
   half the time on the thing a defensive signal must get right.
-- **Volatility targeting works as a mechanism.** It is a mechanical transform
-  requiring no forecast, and the drawdown reduction is not a fitted result.
+- **Volatility targeting cuts drawdown mechanically.** It requires no forecast
+  and the drawdown reduction is not a fitted result — it holds on both the
+  inflated and the corrected universe.
 
 **Held with reservations**
 
-- Vol targeting's *absolute* figures inherit the survivorship bias — they were
-  measured on the survivor-only basket. The relative effect should survive;
-  the levels should not. **Not yet rerun on the corrected universe.**
+- **Nothing built here beats buy-and-hold BTC.** On the corrected universe,
+  BTC returns 5.61× at ret/vol 0.60; the best overlay config manages 1.99× at
+  0.38, and base momentum 6.49× at 0.46. Stated with reservation only because
+  the corrected universe is itself imperfect (see below) — not because there
+  is reason to think the ordering flips.
 - The yield leg's contribution assumes a flat APY across 2020–2026. Real rates
   ranged ~20% (2021) to ~2% (2023), and idle capital peaks in the bear years
-  when rates were *lowest*. The true figure sits **below** the 5% column.
+  when rates were *lowest*. On the corrected universe yield carries a third of
+  total return, so this assumption now matters more, not less.
 
 **Explicitly not known**
 
@@ -189,12 +193,20 @@ long/short ratio — all positioning work is effectively **single-exchange
 
 ## The honest summary
 
-Set out to build a signal-driven allocation system. Found that the signal
-half doesn't exist in reachable data, that the one apparent edge was
-substantially a counting artifact, and that the part which survives is the
-boring mechanical one.
+Set out to build a signal-driven allocation system. Found that the signal half
+doesn't exist in reachable data, that the one apparent edge was substantially
+a counting artifact, and that the risk-management layer — while mechanically
+real — does not turn a poor return stream into a good one.
 
-Managing second moments works. Predicting first moments mostly doesn't. That
-is a real conclusion, arrived at from this project's own data rather than
-taken on authority — and it is worth more than the result originally hoped
-for.
+On the survivorship-corrected universe, **nothing built here beats holding
+bitcoin**. Momentum, vol targeting and the yield leg are all dominated by a
+buy-and-hold benchmark on risk-adjusted return.
+
+That is a complete answer to the original question, arrived at from this
+project's own data. Three stated conclusions were overturned by later tests
+run against them — momentum beating BTC, funding momentum as a defensive
+signal, and vol targeting as an improvement rather than a rescaling. Each was
+overturned because the test that could kill it was actually run.
+
+Managing second moments works. Predicting first moments mostly doesn't. And a
+benchmark you can't beat is information, not failure.
