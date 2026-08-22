@@ -54,6 +54,25 @@ TRACKED_HORIZONS_MIN: tuple[int, ...] = (60, 240, 1440)  # 1h, 4h, 24h
 # out of the forecaster.
 PRICE_MATCH_TOLERANCE_MIN: int = 90
 
+# Some assets don't trade 24/7. Oil futures (WTI) have an overnight
+# maintenance break plus full weekend/holiday closures, so a target
+# timestamp can land in a gap that's many hours — or, over a long
+# weekend, ~65 hours — from the nearest candle. The symmetric 90-minute
+# tolerance above is correct for 24/7 crypto but would mark most oil
+# outcomes `unavailable`.
+#
+# For these assets we (a) allow a much wider tolerance and (b) prefer
+# the NEXT candle after the target ("roll forward"), because that is the
+# session in which the market actually reprices news that broke while it
+# was closed. A Friday-night headline is priced at Monday's open; that
+# open is the honest outcome, not a stale Friday close.
+NON_24_7_ASSETS: frozenset[str] = frozenset({"WTI", "GOLD"})
+
+# Forward tolerance for non-24/7 assets: 4 days covers the longest
+# regular weekend-plus-holiday closure. Beyond that we genuinely have no
+# repricing event and mark unavailable.
+NON_24_7_FORWARD_TOLERANCE_MIN: int = 4 * 24 * 60  # 5760
+
 # After this many failed resolution attempts, give up and mark the
 # outcome `unavailable`. Prevents the worker from retrying forever on
 # a row that genuinely can't be resolved (e.g. trigger fired before
@@ -89,6 +108,7 @@ def schedule_outcomes(
     conn=None,
     assets: tuple[str, ...] = TRACKED_ASSETS,
     horizons_min: tuple[int, ...] = TRACKED_HORIZONS_MIN,
+    category: Optional[str] = None,
 ) -> SchedulingResult:
     """Insert pending-outcome rows for a newly-created trigger.
 
@@ -104,9 +124,25 @@ def schedule_outcomes(
         conn: optional connection. New one opened/closed if absent.
         assets, horizons_min: override the defaults above; mostly useful
             for tests that want a smaller cross product.
+        category: the headline's category. When provided, asset routing
+            (config.asset_routing) narrows `assets` to only those
+            exposed to this category — e.g. geopolitical news schedules
+            outcomes for oil, not BTC/ETH. When None (the default), all
+            `assets` are scheduled, preserving the pre-routing behaviour
+            for existing callers and tests. A category that routes to no
+            assets schedules nothing and returns an empty result.
 
     Returns SchedulingResult with counts.
     """
+    if category is not None:
+        from config.asset_routing import assets_for_category
+        routed = assets_for_category(category)
+        # Intersect routing with the caller's asset set, preserving the
+        # routing order. This lets a test still pass a restricted
+        # `assets` and have routing narrow it further, without ever
+        # scheduling an asset the caller didn't allow.
+        assets = tuple(a for a in routed if a in assets) if assets is not TRACKED_ASSETS else routed
+
     if trigger_fired_at.tzinfo is None:
         # We always store/compare in UTC. Reject naive datetimes
         # explicitly rather than silently assuming a timezone.
@@ -163,14 +199,53 @@ def _lookup_close_price(
     target: datetime,
     tolerance_min: int = PRICE_MATCH_TOLERANCE_MIN,
 ) -> Optional[float]:
-    """Find the close price closest to `target` within ±tolerance_min.
+    """Find the close price closest to `target` within tolerance.
 
-    Returns None if no candle is within tolerance. We pick the closest
-    candle (not the previous one) so 30-minute drift in either direction
-    is symmetric. The 90-minute tolerance accommodates rare gaps in the
-    candle history; in normal operation the closest candle is within
-    30 minutes of any target.
+    For 24/7 assets (crypto) we pick the closest candle within
+    ±tolerance_min, so 30-minute drift in either direction is symmetric.
+
+    For non-24/7 assets (oil — see NON_24_7_ASSETS) the market is often
+    closed at `target`. We instead roll FORWARD to the first candle at
+    or after the target, within a wide forward tolerance, because that
+    next session is where news is actually repriced. We still accept a
+    candle slightly before the target (within the normal symmetric
+    tolerance) to handle the ordinary between-candles case during open
+    hours — we just don't roll backward across a whole closed session.
+
+    Returns None if nothing is within tolerance.
     """
+    if asset in NON_24_7_ASSETS:
+        # Try the normal symmetric small window first (market was open,
+        # target just fell between two candles).
+        cur.execute("""
+            SELECT close
+            FROM price_snapshots
+            WHERE symbol = %s
+              AND timestamp BETWEEN %s - (%s * INTERVAL '1 minute')
+                                AND %s + (%s * INTERVAL '1 minute')
+            ORDER BY ABS(EXTRACT(EPOCH FROM (timestamp - %s))) ASC
+            LIMIT 1
+        """, (asset, target, PRICE_MATCH_TOLERANCE_MIN,
+              target, PRICE_MATCH_TOLERANCE_MIN, target))
+        row = cur.fetchone()
+        if row is not None:
+            return float(row["close"])
+
+        # Market was closed at target — roll forward to the next
+        # available session candle within the wide forward tolerance.
+        cur.execute("""
+            SELECT close
+            FROM price_snapshots
+            WHERE symbol = %s
+              AND timestamp >= %s
+              AND timestamp <= %s + (%s * INTERVAL '1 minute')
+            ORDER BY timestamp ASC
+            LIMIT 1
+        """, (asset, target, target, NON_24_7_FORWARD_TOLERANCE_MIN))
+        row = cur.fetchone()
+        return float(row["close"]) if row else None
+
+    # 24/7 asset: closest candle within symmetric tolerance.
     cur.execute("""
         SELECT close, timestamp,
                EXTRACT(EPOCH FROM (timestamp - %s)) / 60 AS drift_min

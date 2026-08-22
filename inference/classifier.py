@@ -43,7 +43,7 @@ REACTIVE_CATEGORIES = {"technical_analysis", "price_commentary", "opinion", "pro
 class HeadlineClassifierInference:
     """Load trained model and classify headlines."""
 
-    def __init__(self, model_dir: str = None):
+    def __init__(self, model_dir: str = None, quantize: bool = False):
         model_dir = model_dir or MODEL_DIR
         model_path = os.path.join(model_dir, "headline_classifier.pt")
         tokenizer_path = os.path.join(model_dir, "tokenizer")
@@ -67,6 +67,24 @@ class HeadlineClassifierInference:
         )
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()
+
+        # Optional int8 dynamic quantization. Quantizes Linear layers to
+        # int8 at inference time (no retraining). The int8 matmuls use the
+        # CPU's AVX-VNNI / SIMD instructions via PyTorch's optimized
+        # kernels — the SIMD speedup without hand-written C. Typically
+        # 2-4x faster on CPU for a transformer, with sub-1% accuracy loss
+        # on a classification head. Off by default (keeps live-pipeline
+        # behaviour bit-identical); turn on for large batch backfills via
+        # classify_backfill --quantize. NOTE: a quantized model produces
+        # very slightly different probabilities than float32 — fine for a
+        # backfill, but it means batch-classified rows aren't bit-identical
+        # to live float32 rows. For this experiment that's an acceptable
+        # trade for the speed; we note it as a (tiny) source of variance.
+        if quantize:
+            self.model = torch.quantization.quantize_dynamic(
+                self.model, {torch.nn.Linear}, dtype=torch.qint8
+            )
+            logger.info("Applied int8 dynamic quantization to Linear layers.")
 
         self.tokenizer = DistilBertTokenizer.from_pretrained(tokenizer_path)
         logger.info(f"Model loaded from {model_path}")
@@ -94,6 +112,57 @@ class HeadlineClassifierInference:
         impact_probs = torch.softmax(impact_logits, dim=1)[0]
         cat_probs = torch.softmax(cat_logits, dim=1)[0]
 
+        # Shared assembly so classify() and classify_batch() are identical.
+        return self._assemble_result(impact_probs, cat_probs)
+
+    def classify_batch(self, headlines: list, batch_size: int = 64) -> list:
+        """Classify many headlines with REAL tensor batching.
+
+        The previous implementation looped classify() one headline at a
+        time — correct but slow, because each call paid full tokenization
+        plus a single-item forward pass. For large backfills (hundreds of
+        thousands of headlines on CPU) that is the difference between a
+        few hours and most of a day. Here we tokenize and forward-pass in
+        batches of `batch_size`, which amortises per-call overhead and
+        lets the matrix ops run at width — typically several times faster
+        on CPU.
+
+        Returns a list of result dicts in the same order as the input,
+        identical in shape to classify()'s output.
+        """
+        if not headlines:
+            return []
+
+        results = []
+        for start in range(0, len(headlines), batch_size):
+            chunk = headlines[start:start + batch_size]
+            # Dynamic padding (padding=True) pads only to the longest
+            # headline IN THIS BATCH, not a fixed 128. Headlines are
+            # ~15-25 tokens, so fixed max_length=128 padding made the
+            # model process ~5-8x mostly-padding tokens — the dominant
+            # cost on CPU. Dynamic padding cuts that without changing
+            # results (attention_mask zeroes padding either way).
+            # We still cap at 128 via truncation for the rare long title.
+            encoding = self.tokenizer(
+                chunk, truncation=True, padding=True,
+                max_length=128, return_tensors="pt",
+            )
+            with torch.no_grad():
+                impact_logits, cat_logits = self.model(
+                    encoding["input_ids"], encoding["attention_mask"]
+                )
+            impact_probs = torch.softmax(impact_logits, dim=1)
+            cat_probs = torch.softmax(cat_logits, dim=1)
+
+            for i in range(len(chunk)):
+                results.append(self._assemble_result(
+                    impact_probs[i], cat_probs[i]
+                ))
+        return results
+
+    def _assemble_result(self, impact_probs, cat_probs) -> dict:
+        """Build a result dict from per-item probability tensors. Shared
+        by classify() and classify_batch() so the two can never drift."""
         impact_idx = impact_probs.argmax().item()
         cat_idx = cat_probs.argmax().item()
 
@@ -102,20 +171,12 @@ class HeadlineClassifierInference:
         impact_conf = float(impact_probs[impact_idx])
         cat_conf = float(cat_probs[cat_idx])
 
-        # Compute news_impact_score for pipeline integration
         magnitude = IMPACT_WEIGHT.get(impact_level, 0.0) * impact_conf
         is_reactive = category in REACTIVE_CATEGORIES
-
-        # Reactive headlines get zero impact score regardless of timing
         if is_reactive:
             magnitude = 0.0
-
         news_impact_score = magnitude
 
-        # Should the capture gate tighten?
-        # Rely on category prediction (reliable at ~85% F1) rather than
-        # impact level prediction (unreliable — impact depends on market
-        # conditions not visible in the headline text).
         should_tighten = (
             category in TIGHTEN_CATEGORIES
             and cat_conf > 0.6
@@ -131,10 +192,6 @@ class HeadlineClassifierInference:
             "news_impact_score": round(news_impact_score, 3),
             "should_tighten_gates": should_tighten,
         }
-
-    def classify_batch(self, headlines: list) -> list:
-        """Classify multiple headlines at once (more efficient)."""
-        return [self.classify(h) for h in headlines]
 
 
 if __name__ == "__main__":

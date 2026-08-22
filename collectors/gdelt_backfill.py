@@ -118,12 +118,23 @@ def fetch_gdelt_articles(query: str, start_date: str = None, end_date: str = Non
     return articles
 
 
-def backfill_gdelt(queries: list = None, days_back: int = 85):
+def backfill_gdelt(queries: list = None, days_back: int = 85,
+                   start: datetime = None, end: datetime = None):
     """
     Backfill headlines from GDELT.
 
     Iterates over multiple search queries and time windows to get
-    broad crypto news coverage for the last ~3 months.
+    broad crypto news coverage.
+
+    Window selection:
+      - If `start` and `end` are given (timezone-aware UTC datetimes),
+        backfill that explicit historical window. This is how you pull
+        2022 crash periods for the defensive-trigger experiment, e.g.
+        start=2022-05-01, end=2022-05-31 for the LUNA collapse. GDELT
+        DOC 2.0 serves history back to 2017, so historical windows work
+        — the only limits are 250 records per call and rate limiting.
+      - Otherwise, fall back to the rolling `now - days_back` → now
+        behaviour (the default live-ish backfill).
     """
     queries = queries or QUERIES
 
@@ -134,7 +145,9 @@ def backfill_gdelt(queries: list = None, days_back: int = 85):
         INSERT INTO collection_runs (source_type, metadata)
         VALUES ('gdelt', %s::jsonb)
         RETURNING id
-    """, (json.dumps({"queries": len(queries), "days_back": days_back}),))
+    """, (json.dumps({"queries": len(queries), "days_back": days_back,
+                      "start": start.isoformat() if start else None,
+                      "end": end.isoformat() if end else None}),))
     run_id = cur.fetchone()["id"]
     conn.commit()
 
@@ -143,13 +156,19 @@ def backfill_gdelt(queries: list = None, days_back: int = 85):
     api_calls = 0
     now = datetime.now(timezone.utc)
 
+    # Resolve the overall window to walk.
+    if start is not None and end is not None:
+        window_floor, window_ceiling = start, end
+    else:
+        window_floor, window_ceiling = now - timedelta(days=days_back), now
+
     # Iterate in 7-day windows for each query
     for q_idx, query in enumerate(queries):
         logger.info(f"Query {q_idx+1}/{len(queries)}: {query}")
 
-        window_start = now - timedelta(days=days_back)
-        while window_start < now:
-            window_end = min(window_start + timedelta(days=7), now)
+        window_start = window_floor
+        while window_start < window_ceiling:
+            window_end = min(window_start + timedelta(days=7), window_ceiling)
 
             start_str = window_start.strftime("%Y%m%d%H%M%S")
             end_str = window_end.strftime("%Y%m%d%H%M%S")
@@ -234,11 +253,27 @@ def backfill_gdelt(queries: list = None, days_back: int = 85):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Backfill crypto headlines from GDELT")
-    parser.add_argument("--days", type=int, default=85, help="Days back (max ~90)")
+    parser.add_argument("--days", type=int, default=85,
+                        help="Days back from now (used only when --start/--end "
+                             "are not given).")
     parser.add_argument("--query", type=str, help="Single custom query")
+    parser.add_argument("--start", type=str,
+                        help="Explicit window start, YYYY-MM-DD (UTC). "
+                             "Use with --end to backfill a historical period, "
+                             "e.g. --start 2022-05-01 --end 2022-05-31 for the "
+                             "LUNA collapse. GDELT serves history back to 2017.")
+    parser.add_argument("--end", type=str,
+                        help="Explicit window end, YYYY-MM-DD (UTC).")
     args = parser.parse_args()
 
-    if args.query:
-        backfill_gdelt(queries=[args.query], days_back=args.days)
-    else:
-        backfill_gdelt(days_back=args.days)
+    start = end = None
+    if args.start or args.end:
+        if not (args.start and args.end):
+            parser.error("--start and --end must be given together.")
+        start = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        if start >= end:
+            parser.error("--start must be before --end.")
+
+    queries = [args.query] if args.query else None
+    backfill_gdelt(queries=queries, days_back=args.days, start=start, end=end)

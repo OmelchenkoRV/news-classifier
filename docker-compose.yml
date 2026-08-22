@@ -131,7 +131,8 @@ services:
     command: >
       sh -c "while true; do
                echo '[price-backfill] Starting cycle';
-               python -m collectors.price_backfill --months 1 || echo '[price-backfill] failed, will retry next cycle';
+               python -m collectors.price_backfill --months 1 || echo '[price-backfill] crypto failed, will retry next cycle';
+               python -m collectors.commodity_backfill --interval 1h --days 7 || echo '[price-backfill] commodities failed, will retry next cycle';
                echo '[price-backfill] Cycle done; sleeping 1h';
                sleep 3600;
              done"

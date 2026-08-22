@@ -139,7 +139,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Backfill hourly prices from Binance")
     parser.add_argument("--months", type=int, default=12, help="Months of history")
     parser.add_argument("--symbol", type=str, help="Single symbol to backfill")
+    parser.add_argument("--universe", action="store_true",
+                        help="Backfill the full tradeable universe "
+                             "(config.universe.TRADEABLE_UNIVERSE) instead "
+                             "of the default BTC/ETH. Use for seeding the "
+                             "momentum-rotation token set.")
     args = parser.parse_args()
 
-    syms = [args.symbol] if args.symbol else None
+    if args.universe:
+        from config.universe import universe
+        syms = list(universe())
+    elif args.symbol:
+        syms = [args.symbol]
+    else:
+        syms = None
     backfill_prices(months=args.months, symbols=syms)

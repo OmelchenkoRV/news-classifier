@@ -259,6 +259,55 @@ class TestScheduling:
         assert mock_conn.store["outcomes"][0]["asset"] == "BTCUSDT"
         assert mock_conn.store["outcomes"][0]["horizon_minutes"] == 60
 
+    def test_category_routing_geopolitical_to_commodities(self, mock_conn):
+        # geopolitical routes to oil + gold — not crypto.
+        fired_at = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+        result = schedule_outcomes(
+            trigger_id=42, trigger_fired_at=fired_at, conn=mock_conn,
+            category="geopolitical",
+        )
+        assets = {o["asset"] for o in mock_conn.store["outcomes"]}
+        assert assets == {"WTI", "GOLD"}
+        assert "BTCUSDT" not in assets and "ETHUSDT" not in assets
+        assert result.rows_created == 2 * len(TRACKED_HORIZONS_MIN)
+
+    def test_category_routing_regulatory_to_crypto(self, mock_conn):
+        fired_at = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+        schedule_outcomes(
+            trigger_id=42, trigger_fired_at=fired_at, conn=mock_conn,
+            category="regulatory",
+        )
+        assets = {o["asset"] for o in mock_conn.store["outcomes"]}
+        assert assets == {"BTCUSDT", "ETHUSDT"}
+        assert "WTI" not in assets
+
+    def test_category_routing_macro_cross_asset(self, mock_conn):
+        fired_at = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+        schedule_outcomes(
+            trigger_id=42, trigger_fired_at=fired_at, conn=mock_conn,
+            category="macro",
+        )
+        assets = {o["asset"] for o in mock_conn.store["outcomes"]}
+        assert assets == {"BTCUSDT", "ETHUSDT", "WTI", "GOLD"}
+
+    def test_category_routing_reactive_schedules_nothing(self, mock_conn):
+        fired_at = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+        result = schedule_outcomes(
+            trigger_id=42, trigger_fired_at=fired_at, conn=mock_conn,
+            category="opinion",
+        )
+        assert result.rows_created == 0
+        assert mock_conn.store["outcomes"] == []
+
+    def test_no_category_preserves_legacy_behaviour(self, mock_conn):
+        # Without a category, all TRACKED_ASSETS are scheduled (the
+        # pre-routing default) — so existing callers are unaffected.
+        fired_at = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+        result = schedule_outcomes(
+            trigger_id=42, trigger_fired_at=fired_at, conn=mock_conn,
+        )
+        assert result.rows_created == len(TRACKED_ASSETS) * len(TRACKED_HORIZONS_MIN)
+
 
 # ---------------------------------------------------------------------------
 # Resolution tests
