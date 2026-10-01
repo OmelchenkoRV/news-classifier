@@ -128,7 +128,6 @@ dmypy.json
 
 #Jetbrain files
 /.idea
-/Scripts
 /pyvenv.cfg
 
 # minio files
@@ -174,3 +173,5 @@ project-tree.txt
 Thumbs.db
 
 collectors/.gdelt_archive_progress
+
+symbols_usdt.txt

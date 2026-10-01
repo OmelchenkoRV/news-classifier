@@ -81,12 +81,28 @@ S3_NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 LEVERAGED_SUFFIXES = ("UPUSDT", "DOWNUSDT", "UPUSDC", "DOWNUSDC",
                       "UPBUSD", "DOWNBUSD")
 
-# Tokenized equities traded against BUSD with a trailing 'B' convention.
-TOKENIZED_STOCKS = {
-    "AAPLBUSDT", "AAOIBUSDT", "TSLABUSDT", "COINBUSDT", "MSTRBUSDT",
-    "MSFTBUSDT", "NVDABUSDT", "AMZNBUSDT", "GOOGLBUSDT", "NFLXBUSDT",
-    "BABABUSDT", "PYPLBUSDT", "MRNABUSDT",
+# Tokenized equities used a `<TICKER>B` + quote convention (AAPLBUSDT =
+# AAPL vs BUSD... then USDT). Hardcoding names does NOT scale — the first
+# pass missed AMAT, AMD and ARM. Detect the pattern instead, with a
+# known-crypto allowlist so legitimate coins ending in B are kept.
+_KNOWN_B_CRYPTO = {
+    "BNB", "COMB", "ARB", "BLUR", "JOB", "GLMB",   # legitimate bases
 }
+
+
+def _looks_like_tokenized_stock(base: str) -> bool:
+    """`<TICKER>B` pattern: AAPLB, AMATB, AMDB, ARMB, TSLAB…
+
+    Equity tickers are 1-5 uppercase letters followed by the 'B'
+    (BUSD-settled) marker. Crypto bases ending in a legitimate B are
+    allowlisted above.
+    """
+    if not base.endswith("B") or len(base) < 3:
+        return False
+    if base in _KNOWN_B_CRYPTO:
+        return False
+    stem = base[:-1]
+    return 1 <= len(stem) <= 5 and stem.isalpha() and stem.isupper()
 
 # Stablecoin-vs-stablecoin pairs: no directional return to rank on.
 STABLE_BASES = {"USDC", "BUSD", "TUSD", "FDUSD", "USDP", "PAX", "DAI",
@@ -96,87 +112,122 @@ STABLE_BASES = {"USDC", "BUSD", "TUSD", "FDUSD", "USDP", "PAX", "DAI",
 
 def is_tradeable_spot(sym: str, quote: str = "USDT") -> bool:
     """Exclude instruments that are not spot crypto vs `quote`."""
+    # Real Binance tickers are ASCII alphanumerics. Anything else is an
+    # artefact of the listing (encoding noise, placeholder entries) and
+    # would be untradeable regardless.
+    if not sym.isascii() or not sym.isalnum():
+        return False
     if not sym.endswith(quote):
         return False
     if sym.endswith(LEVERAGED_SUFFIXES):
         return False
-    if sym in TOKENIZED_STOCKS:
-        return False
     base = sym[: -len(quote)]
     if not base or base in STABLE_BASES:
+        return False
+    if _looks_like_tokenized_stock(base):
         return False
     return True
 
 
-def _parse_listing(xml_text: str) -> tuple[list[str], str | None, bool]:
-    """Return (symbols, next_token_or_marker, is_truncated)."""
+def _parse_listing(xml_text: str, version: str = "v2"
+                   ) -> tuple[list[str], str | None, bool]:
+    """Return (symbols, next_marker_or_token, is_truncated).
+
+    V1 and V2 paginate differently: V1 wants `marker` = the LAST KEY or
+    CommonPrefix returned; V2 wants the server-supplied
+    NextContinuationToken. Returning the wrong one causes HTTP 400.
+    """
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
         return [], None, False
 
-    syms = []
+    syms, last_prefix = [], None
     for cp in root.findall(f"{S3_NS}CommonPrefixes"):
         p = cp.findtext(f"{S3_NS}Prefix") or ""
+        last_prefix = p
         name = p[len(PREFIX):].strip("/")
         if name:
             syms.append(name)
 
     truncated = (root.findtext(f"{S3_NS}IsTruncated") or "false").lower() == "true"
-    # V2 uses NextContinuationToken; V1 uses NextMarker (or last key).
-    token = (root.findtext(f"{S3_NS}NextContinuationToken")
-             or root.findtext(f"{S3_NS}NextMarker"))
-    if truncated and not token and syms:
-        token = PREFIX + syms[-1] + "/"      # V1 fallback: marker = last prefix
+
+    if version == "v2":
+        token = root.findtext(f"{S3_NS}NextContinuationToken")
+    else:
+        # V1: server may supply NextMarker; if not (common when using a
+        # delimiter), the marker is the last CommonPrefix returned.
+        token = root.findtext(f"{S3_NS}NextMarker") or last_prefix
     return syms, token, truncated
 
 
 def enumerate_symbols() -> list[str]:
-    """List every symbol directory in the spot monthly klines prefix."""
+    """List every symbol directory in the spot monthly klines prefix.
+
+    Pagination note: S3 ListObjects V1 and V2 take DIFFERENT parameters,
+    and sending both causes HTTP 400 on some endpoints. We probe V2
+    first, fall back to V1, and never mix them in one request.
+    """
     for base in ENDPOINTS:
-        logger.info("trying endpoint: %s", base)
-        symbols, token, guard = [], None, 0
-        ok = False
-        while guard < 60:
-            params = {"delimiter": "/", "prefix": PREFIX, "max-keys": "1000"}
-            if token:
-                # send both; the server ignores the one it doesn't use
-                params["continuation-token"] = token
-                params["marker"] = token
-                params["list-type"] = "2"
-            try:
-                r = requests.get(base, params=params, timeout=45)
-            except Exception as e:
-                logger.warning("  request failed: %s", e)
-                break
-            if r.status_code != 200:
-                logger.warning("  HTTP %s", r.status_code)
-                break
-            if "<ListBucketResult" not in r.text:
-                logger.warning("  not an S3 listing (got %d bytes of %s)",
-                               len(r.text),
-                               "HTML" if "<html" in r.text.lower() else "?")
-                break
+        for version in ("v2", "v1"):
+            logger.info("trying %s (list-type %s)", base, version)
+            symbols, token, guard, complete = [], None, 0, False
 
-            batch, token, truncated = _parse_listing(r.text)
-            symbols.extend(batch)
-            ok = True
-            logger.info("  +%d symbols (total %d)%s",
-                        len(batch), len(symbols),
-                        " …more" if truncated else "")
-            if not truncated or not batch:
-                break
-            guard += 1
+            while guard < 200:
+                params = {"delimiter": "/", "prefix": PREFIX,
+                          "max-keys": "1000"}
+                if version == "v2":
+                    params["list-type"] = "2"
+                    if token:
+                        params["continuation-token"] = token
+                else:
+                    if token:
+                        params["marker"] = token
 
-        if ok and symbols:
-            logger.info("SUCCESS via %s — %d symbols", base, len(symbols))
-            return sorted(set(symbols))
+                try:
+                    r = requests.get(base, params=params, timeout=45)
+                except Exception as e:
+                    logger.warning("  request failed: %s", e)
+                    break
+                if r.status_code != 200:
+                    logger.warning("  HTTP %s on page %d", r.status_code,
+                                   guard + 1)
+                    break
+                if "<ListBucketResult" not in r.text:
+                    logger.warning("  not an S3 listing (%d bytes of %s)",
+                                   len(r.text),
+                                   "HTML" if "<html" in r.text.lower() else "?")
+                    break
 
-    logger.error("No endpoint returned an S3 listing. The bucket may require "
-                 "a different form; open one of these in a browser to see "
-                 "what comes back:")
-    for b in ENDPOINTS:
-        logger.error("  %s?delimiter=/&prefix=%s&max-keys=10", b, PREFIX)
+                batch, token, truncated = _parse_listing(r.text, version)
+                symbols.extend(batch)
+                guard += 1
+                if guard % 5 == 0 or not truncated:
+                    logger.info("  page %d: %d symbols so far%s",
+                                guard, len(symbols),
+                                "" if truncated else " (complete)")
+                if not truncated:
+                    complete = True
+                    break
+                if not batch or not token:
+                    logger.warning("  truncated but no continuation marker — "
+                                   "pagination stalled at %d", len(symbols))
+                    break
+
+            # Only accept a listing we know we finished. A partial listing
+            # silently truncates the universe — which is exactly the class
+            # of error this whole exercise exists to remove.
+            if complete and symbols:
+                logger.info("SUCCESS via %s (%s) — %d symbols, %d pages",
+                            base, version, len(symbols), guard)
+                return sorted(set(symbols))
+            if symbols:
+                logger.warning("  INCOMPLETE (%d symbols) — discarding and "
+                               "trying next method", len(symbols))
+
+    logger.error("No endpoint returned a COMPLETE S3 listing. A partial "
+                 "listing is worse than none here: it would silently "
+                 "truncate the universe alphabetically.")
     return []
 
 
@@ -224,7 +275,9 @@ def main() -> int:
         print(f"  … and {len(syms) - 60} more")
 
     if args.save:
-        with open(args.save, "w") as fh:
+        # Explicit UTF-8: Windows defaults to cp1252, which cannot encode
+        # every symbol in the archive.
+        with open(args.save, "w", encoding="utf-8") as fh:
             fh.write("\n".join(syms) + "\n")
         logger.info("wrote %s", args.save)
 
