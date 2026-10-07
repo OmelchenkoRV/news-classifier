@@ -5,7 +5,7 @@ system** for crypto (YIELD / DIRECTIONAL / DEFENSIVE) and, over the course of
 testing, answered its own question in the negative.
 
 **Short version:** the DEFENSIVE state was supposed to be driven by a signal
-that detects crashes early. Eight candidates were tested across three data
+that detects crashes early. Ten candidates were tested across three data
 modalities. None worked. What *did* work required no prediction at all —
 sizing exposure inversely to trailing realised volatility, which produces the
 DIRECTIONAL/YIELD split mechanically.
@@ -23,10 +23,12 @@ strategy. Every claim below is qualified by what is actually known.
 | 2 | Asset routing (oil/gold) | **NULL** — fatally under-powered, n=1–2 per cell | — |
 | 3 | Price vol/drawdown breaker | **NULL** — 4/36 configs improved risk-adjusted return; cut drawdown but paid in whipsaw. *A lookahead bug first produced a fake 746× result* | — |
 | 4 | News-systemic flag | **DATA WALL** — GDELT GKG has no titles; classifier fed URL-slug salad reverted to a volume-correlated baseline. Fired **hardest in the calm control** | `FINDINGS_news_systemic_null.md` |
-| 5 | ETF flows | **NULL** — below the unconditional base rate in **22/36 cells**. The hypothesis rested on the single largest outcome in 27 firings | `FINDINGS_aug2026_rally.md` |
+| 5 | ETF inflow crossovers → rallies (BTC) | **NULL** — below the unconditional base rate in **22/36 cells**. The hypothesis rested on the single largest outcome in 27 firings. *Scope: inflows→rallies only; outflows→drawdowns is #10* | `FINDINGS_aug2026_rally.md` |
 | 6 | Funding rate — level (F1) | **INVERTED** — below baseline in *every* cell. Funding goes negative *after* capitulation, so it fires near bottoms | `FINDINGS_funding_defensive.md` |
 | 7 | Funding rate — momentum (F2) | **PARTIAL, then closed** — first contiguous winning region in the project; the decisive era replicated on ETH (+17.3pp, n=33). But the largest-n era failed to replicate, and the effect **inverts at 20% drawdowns**. Flags routine volatility, not crashes | `FINDINGS_funding_defensive.md` |
 | 8 | Liquidation cascade | **NO EFFECT** — elasticity does not rise with move size (sharpest down bucket: 0.92). Deleveraging is proportional, not explosive. Depth capture also truncated | `FINDINGS_liquidation_cascade.md` |
+| 9 | Taker buy/sell ratio | **NULL** — pre-registered on a CryptoQuant chart's own claim ("most bearish since June"). Bearish edge −1.7pp, z=−0.23. Contrarian hint reverses across eras, flips sign at the adjacent threshold, and disagrees between ETH and BTC futures. Spot null | `FINDINGS_taker_ratio.md` |
+| 10 | ETF outflow extremes → drawdowns | **NULL** — ETH edge +0.8pp (z=+0.07), BTC +0.2pp (z=+0.03); both on the unconditional rate. Grid showed 42/54 positive cells — an artifact of cells sharing events. Expanding thresholds and publication lag built in | `FINDINGS_etf_outflows.md` |
 
 **One structural result — substantially withdrawn on rerun:**
 
@@ -47,7 +49,7 @@ strategy. Every claim below is qualified by what is actually known.
 **Strongly held**
 
 - Crash-leading signals are **not extractable from freely available data** at
-  the granularity tried here. Eight candidates, three modalities, consistent
+  the granularity tried here. Ten candidates, three modalities, consistent
   failure. This is unsurprising once stated plainly: a genuinely predictive
   crash signal would be enormously valuable, so the prior that it sits in free
   public data was always low.
@@ -87,9 +89,12 @@ These were learned the expensive way and are the most portable output.
 1. **Sweep + baseline, always.** A hit rate means nothing without the
    unconditional base rate over the same window. "55% false positives" is
    meaningless if 55% of random days qualify.
-2. **Contiguity, not peaks.** Isolated winning cells are noise. The price
-   breaker had 4/36 lucky cells and was correctly rejected; the ETF flow
-   signal's two best cells were non-monotone and rested on n=11.
+2. **Contiguity, not peaks — across INDEPENDENT evidence only.** Isolated
+   winning cells are noise. But neighbouring grid cells usually share most of
+   their events, so a run of positive cells can be one lucky event set
+   repeated — pure noise produced +32.9pp, z=+3.10 with a contiguous-looking
+   column. Contiguity counts only across other assets, other eras, and
+   non-overlapping events.
 3. **Era-specific baselines.** Pooled baselines hide the effect. BTC's
    drawdown base rate was 31.5% / 11.4% / 16.0% across three eras — a pooled
    figure would have been meaningless.
@@ -106,6 +111,23 @@ These were learned the expensive way and are the most portable output.
    delisted token vanish for free instead of taking the loss.
 8. **Watch for recycled tickers.** Binance reused `LUNAUSDT` for Terra 2.0;
    splicing would fabricate a collapse-then-recovery. Same class as MATIC→POL.
+9. **Count events, not days.** A signal that stays on for ten days is one
+   event, not ten. Counting days produces overlapping outcome windows —
+   pseudo-replication that inflates n and significance. Count crossings, with
+   a refractory period.
+10. **Pre-register on the claim's own terms.** When testing a shared chart,
+    fix the primary cell to the exact threshold the chart cites, before
+    collecting data. It gives the claim its best shot and removes any
+    accusation of cherry-picking — and a refutation on those terms is final.
+11. **Calibrate the calibration.** A noise-floor method must be checked on
+    data where the answer is known before it is used. A permutation null built
+    for the ETF test flagged pure noise as significant at more than twice the
+    nominal rate — it was removed, not kept. A tool known to be wrong is worse
+    than no tool, because someone will trust it later.
+12. **No rescue analyses after a null.** Plausible improvements proposed only
+    after seeing a null (e.g. normalising ETF flows by assets under management)
+    are recorded as limitations, not rerun. Otherwise every null becomes a
+    search for the version that works.
 
 ---
 
@@ -134,6 +156,10 @@ tests/         92 passing, 35 skipped
 | `python -m scripts.backtest_survivorship` | Survivorship test + dead-token trade log |
 | `python -m collectors.binance_archive --probe` | Recover delisted symbol history |
 | `python -m collectors.funding_backfill` | Funding history to 2019 |
+| `python -m collectors.taker_flow_backfill` | Taker buy/sell volume from the archive (spot + futures) |
+| `python -m scripts.test_taker_ratio` | Pre-registered taker-ratio test, both directions |
+| `python -m scripts.test_etf_outflows` | ETF outflow extremes → drawdowns; `--calibrate` measures the noise band |
+| `python -m scripts.orderbook_walls` | Full Binance order book, resting-order clusters by price |
 | `python -m capture.etf_flows` | Daily ETF flows (idempotent) |
 
 ### Analysis queries
@@ -150,6 +176,7 @@ tests/         92 passing, 35 skipped
 |---|---|
 | `price_snapshots` | 11 survivors + 9 dead tokens, 2020-11 → present |
 | `funding_history` | BTCUSDT/ETHUSDT, 2019-09 → present (~15k rows, **two bear markets**) |
+| `taker_flow` | Taker buy/sell volume, ETH/BTC — futures from 2020, spot from 2017 |
 | `eth_etf_flows` | BTC/ETH/SOL/HYPE daily net flows from ETF launch (602 days) |
 | `eth_snapshots` + `eth_derivatives` | 5-min live capture, 2026-04 → present |
 | `headlines` + `classifications` | ~1.39M GDELT archive headlines, classified |
