@@ -6,9 +6,10 @@ testing, answered its own question in the negative.
 
 **Short version:** the DEFENSIVE state was supposed to be driven by a signal
 that detects crashes early. Ten candidates were tested across three data
-modalities. None worked. What *did* work required no prediction at all —
-sizing exposure inversely to trailing realised volatility, which produces the
-DIRECTIONAL/YIELD split mechanically.
+modalities. None worked. What *did* work required no directional prediction:
+**volatility is forecastable even though direction isn't.** A filtered
+historical simulation corridor passed its pre-registered calibration test on
+both assets — with a conditional caveat: it is too narrow in calm regimes.
 
 The project's value is the **record of what was ruled out and why**, not a
 strategy. Every claim below is qualified by what is actually known.
@@ -29,6 +30,12 @@ strategy. Every claim below is qualified by what is actually known.
 | 8 | Liquidation cascade | **NO EFFECT** — elasticity does not rise with move size (sharpest down bucket: 0.92). Deleveraging is proportional, not explosive. Depth capture also truncated | `FINDINGS_liquidation_cascade.md` |
 | 9 | Taker buy/sell ratio | **NULL** — pre-registered on a CryptoQuant chart's own claim ("most bearish since June"). Bearish edge −1.7pp, z=−0.23. Contrarian hint reverses across eras, flips sign at the adjacent threshold, and disagrees between ETH and BTC futures. Spot null | `FINDINGS_taker_ratio.md` |
 | 10 | ETF outflow extremes → drawdowns | **NULL** — ETH edge +0.8pp (z=+0.07), BTC +0.2pp (z=+0.03); both on the unconditional rate. Grid showed 42/54 positive cells — an artifact of cells sharing events. Expanding thresholds and publication lag built in | `FINDINGS_etf_outflows.md` |
+
+**The one positive result — forecasting the corridor, not the direction:**
+
+| | Result | Doc |
+|---|---|---|
+| Volatility corridor (FHS) | **Calibrated** — Kupiec p > 0.05 in all 40 cells (BTC/ETH, 7d/14d, 5 levels, 2017+ and 2020+). Gaussian bands fail at 95%/99%. **But conditionally miscalibrated:** a "90%" band covered ~78% in calm regimes and ~96% in storms. Least reliable exactly when it looks narrowest | `FINDINGS_vol_corridor.md` |
 
 **One structural result — substantially withdrawn on rerun:**
 
@@ -60,8 +67,17 @@ strategy. Every claim below is qualified by what is actually known.
 - **Volatility targeting cuts drawdown mechanically.** It requires no forecast
   and the drawdown reduction is not a fitted result — it holds on both the
   inflated and the corrected universe.
+- **The volatility corridor is forecastable on average.** FHS passed its
+  pre-registered coverage test across both assets, both horizons and the
+  2017+ period including 2018. Independent support is two correlated assets
+  plus the added 2017–2020 span — strong by this project's standards, but
+  not forty confirmations.
 
 **Held with reservations**
+
+- **The corridor is wrong regime by regime.** Calm-regime bands under-cover
+  (~78% at a nominal 90%); storm-regime bands over-cover (~96%). Read a narrow
+  corridor as narrower than its label.
 
 - **Nothing built here beats buy-and-hold BTC.** On the corrected universe,
   BTC returns 5.61× at ret/vol 0.60; the best overlay config manages 1.99× at
@@ -128,6 +144,11 @@ These were learned the expensive way and are the most portable output.
     after seeing a null (e.g. normalising ETF flows by assets under management)
     are recorded as limitations, not rerun. Otherwise every null becomes a
     search for the version that works.
+13. **Passing the test is not the same as working.** The corridor passed its
+    pre-registered unconditional coverage test in every cell, while being
+    wrong in opposite directions in calm and stormy regimes. After a method
+    passes, check what the test does not measure — conditional coverage,
+    breach clustering, tail asymmetry — before relying on it.
 
 ---
 
@@ -160,6 +181,7 @@ tests/         92 passing, 35 skipped
 | `python -m scripts.test_taker_ratio` | Pre-registered taker-ratio test, both directions |
 | `python -m scripts.test_etf_outflows` | ETF outflow extremes → drawdowns; `--calibrate` measures the noise band |
 | `python -m scripts.orderbook_walls` | Full Binance order book, resting-order clusters by price |
+| `python -m scripts.test_vol_corridor` | Volatility-corridor coverage test + today's corridor; `--long` for 2017+ |
 | `python -m capture.etf_flows` | Daily ETF flows (idempotent) |
 
 ### Analysis queries
@@ -215,6 +237,9 @@ long/short ratio — all positioning work is effectively **single-exchange
   nine universe symbols need `--universe` runs, and stale data here caused a
   real analysis error (see rule 4).
 - GDELT archive checkpoint marks a slot done even on failure — unfixed footgun.
+- `taker_flow` was last refreshed 2026-08-31, so `test_vol_corridor --long`
+  prints a stale "current corridor". Re-run `collectors.taker_flow_backfill`
+  before relying on it.
 
 ---
 
@@ -234,6 +259,11 @@ project's own data. Three stated conclusions were overturned by later tests
 run against them — momentum beating BTC, funding momentum as a defensive
 signal, and vol targeting as an improvement rather than a rescaling. Each was
 overturned because the test that could kill it was actually run.
+
+The one positive result came from changing the question. Direction proved
+unforecastable across ten candidates; the **range** of likely outcomes did
+not. A filtered-historical-simulation corridor is calibrated on average — and
+honestly reported as unreliable in calm regimes, where it is too narrow.
 
 Managing second moments works. Predicting first moments mostly doesn't. And a
 benchmark you can't beat is information, not failure.
