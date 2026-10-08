@@ -201,6 +201,8 @@ tests/         92 passing, 35 skipped
 | `python -m scripts.test_vol_corridor_iv` | Pre-registered corridor v3 test (implied vol); `--self-test`, `--calibrate` |
 | `python -m scripts.test_vol_corridor_cfhs` | Pre-registered Fix 1 test (regime-conditional FHS) on the 9 non-BTC/ETH universe coins; `--self-test`, `--calibrate` |
 | `python -m scripts.corridor_logger` | Forward test service (docker: `corridor-logger`); `--once`, `--loop`, `--report`, `--self-test` |
+| `python -m collectors.wall_capture` | Order book on a fixed price grid every minute (docker: `wall-capture`) |
+| `python -m scripts.wall_fate` | Pre-registered wall test: pulled vs reached, pull rate by distance, do walls hold |
 | `python -m capture.etf_flows` | Daily ETF flows (idempotent) |
 
 ### Analysis queries
@@ -220,6 +222,7 @@ tests/         92 passing, 35 skipped
 | `taker_flow` | Taker buy/sell volume — BTC/ETH futures from 2020, spot from 2017; spot for all 11 universe coins from listing |
 | `dvol_daily` | Deribit DVOL implied vol, BTC/ETH, 2021-03-24 → present (2,024 days each, no gaps) |
 | `corridor_closes` / `corridor_forecasts` / `corridor_outcomes` | Forward test of the corridors, 2026-10-08 → (service-maintained; forecasts write-once) |
+| `ob_book` / `ob_minutes` | Binance spot book (ETH, BTC) on a fixed price grid + 1-minute candles, every minute, from 2026-10-08 |
 | `eth_etf_flows` | BTC/ETH/SOL/HYPE daily net flows from ETF launch (602 days) |
 | `eth_snapshots` + `eth_derivatives` | 5-min live capture, 2026-04 → present |
 | `headlines` + `classifications` | ~1.39M GDELT archive headlines, classified |
@@ -236,6 +239,8 @@ long/short ratio — all positioning work is effectively **single-exchange
    v1/c1 (11 coins) and v3 (BTC/ETH) daily, write-once, and scores each
    window as it closes. First formal read at 12 months (2027-10) under the
    rules already registered; see FINDINGS_vol_corridor.md "Forward tracking".
+   **Wall capture is running too** — read `scripts.wall_fate` after 28 days
+   (from ~2026-11-05) under the rules in `docs/PLAN_wall_fate.md`.
 1. **Rerun vol targeting on the survivorship-extended universe.** The one
    place a stated conclusion rests on numbers known to be wrong. One-line
    change; the relative effect probably holds.

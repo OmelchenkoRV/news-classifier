@@ -7,6 +7,8 @@
 #   eth-capture      — pre-breakout snapshot pipeline (separate Dockerfile)
 #   corridor-logger  — forward test of the volatility corridors (daily forecasts,
 #                      written once, scored when each window closes)
+#   wall-capture     — order book on a fixed price grid every minute (ETH, BTC),
+#                      to test whether walls are pulled before price arrives
 #
 # Usage:
 #   docker compose up -d         # start all in background
@@ -333,6 +335,50 @@ services:
         limits:
           cpus: '0.5'
           memory: 512M
+        reservations:
+          cpus: '0.05'
+          memory: 64M
+
+    healthcheck:
+      disable: true
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "5"
+
+  # ─────────────────────────────────────────────────────────────────
+  # Wall capture — do order-book walls disappear before price arrives?
+  # Every 60 s: full Binance spot book for ETHUSDT and BTCUSDT bucketed on
+  # a FIXED absolute price grid (ETH $2, BTC $50) into ob_book, plus
+  # closed 1-minute candles into ob_minutes. ~3 MB/day; 500 of Binance's
+  # 6,000/min weight allowance. Tables are created on first run.
+  # Analysis (pre-registered, read after >= 28 days):
+  #   docker compose exec wall-capture python -m scripts.wall_fate
+  # See docs/PLAN_wall_fate.md.
+  # ─────────────────────────────────────────────────────────────────
+  wall-capture:
+    image: news-classifier:v2
+    container_name: news-classifier-wall-capture
+    restart: unless-stopped
+    depends_on:
+      - news-classifier
+
+    entrypoint: []
+    command: ["python", "-m", "collectors.wall_capture", "--loop", "--interval", "60"]
+
+    env_file:
+      - .env.docker
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
         reservations:
           cpus: '0.05'
           memory: 64M
