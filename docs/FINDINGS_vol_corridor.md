@@ -186,6 +186,88 @@ realistic two-week range is ±10–20%.
 
 ---
 
+## Move sizes by direction (`--moves`, 2026-10-08)
+
+The corridor answers "how wide". `--moves` answers the question as people
+actually ask it: **if it falls, how far? If it rises, how far?** It splits the
+FHS distribution by sign. It does not say which way.
+
+Two views, each at 1/3/7/14 days:
+
+- **Terminal:** where price *ends*, split into falls and rises. "1-in-5 if
+  it falls" = of the windows that ended down, 1 in 5 fell further than this.
+- **Path:** how far price *travels* inside the window: deepest dip and highest
+  run on daily closes. Both usually happen in the same window, and neither
+  needs a view on direction, so this is the view for stops and liquidation
+  distance. Intraday wicks go further.
+
+Every level is backtested out of sample: expanding window, every day since
+2021-11, overlapping windows (descriptive, no significance test), overall and
+split by the vol tercile at the forecast date. On synthetic GARCH data the
+check returns 19–22% / 5–6% against targets of 20% / 5%.
+
+### Levels on 2026-10-08 (14 days)
+
+BTC $83,046, vol 36% annualised (17th percentile) — **calm**.
+ETH $2,570.66, vol 45% (10th percentile) — **calm**.
+
+| 14d | typical | 1-in-5 | 1-in-20 |
+|---|---|---|---|
+| BTC if it falls | −3.6% | −8.9% ($75.7k) | −18.0% ($68.1k) |
+| BTC if it rises | +4.5% | +10.2% ($91.5k) | +21.5% ($100.9k) |
+| BTC deepest dip | −2.7% | −7.0% ($77.2k) | −14.9% ($70.7k) |
+| BTC highest run | +3.4% | +8.0% ($89.7k) | +16.3% ($96.6k) |
+| ETH if it falls | −5.0% | −10.5% ($2,301) | −20.3% ($2,048) |
+| ETH if it rises | +6.3% | +13.9% ($2,929) | +25.8% ($3,234) |
+| ETH deepest dip | −3.4% | −9.1% ($2,338) | −18.0% ($2,108) |
+| ETH highest run | +4.1% | +10.6% ($2,843) | +22.8% ($3,156) |
+
+### What it showed
+
+1. **Calibrated on average.** Across all regimes the 1-in-5 level was beaten
+   18–22% of the time and the 1-in-20 level 5–7%, for every horizon, view
+   and asset.
+2. **Direction is a coin flip.** The historical up-share is 50–53% at every
+   horizon — consistent with the ten failed direction candidates.
+3. **Rises and falls are nearly the same size.** The larger percentages on
+   the rise side are mostly arithmetic: in log terms the 14d 1-in-20 levels
+   are symmetric (BTC −0.198 / +0.195; ETH −0.227 / +0.230). ETH shows a
+   mild upside tilt in the body (typical −5.0% vs +6.3%, log −0.051 / +0.061).
+4. **In calm regimes the 7–14 day sizes are too small** — the same
+   conditional failure as the corridor, now measured on the levels people
+   would use:
+
+| beaten % (target 20 / 5), calm regime | fall | rise | dip | run |
+|---|---|---|---|---|
+| BTC 1d | 23/7 | 22/7 | 22/6 | 21/7 |
+| BTC 7d | 26/10 | 29/12 | 25/8 | 25/8 |
+| BTC 14d | 32/11 | 25/14 | 27/11 | 26/10 |
+| ETH 1d | 22/6 | 22/8 | 21/6 | 20/6 |
+| ETH 7d | 28/8 | 31/10 | 23/7 | 25/10 |
+| ETH 14d | 29/12 | 34/9 | 24/8 | 30/12 |
+
+   At 1 day the levels hold. The error grows with horizon, which is what the
+   mechanism predicts: EWMA assumes today's low vol lasts the whole window,
+   but calm spells end within days to weeks. At 14 days in a calm regime the
+   "1-in-20" levels behaved like 1-in-8 to 1-in-12 events, and the "1-in-5"
+   levels like 1-in-3 to 1-in-4.
+
+### How strong this is
+
+- **Direction of the error: believable.** All 16 calm-regime cells at 7 and
+  14 days exceed target; it matches the corridor's conditional table and a
+  known mechanism.
+- **Magnitudes: not.** The calm tercile holds roughly 40 non-overlapping
+  14-day windows (fewer genuinely separate calm spells). Each 1-in-20 rate
+  rests on two or three episodes.
+- **Not independent confirmations.** BTC and ETH are highly correlated; dips
+  and falls share episodes.
+- On 2026-10-08 both assets sat deeper in calm (10th–17th percentile) than
+  the average calm-tercile day, so the understatement may be larger than the
+  table. Untested.
+
+---
+
 ## Methodological lesson: passing the test is not the same as working
 
 The pre-registered test scored **unconditional** coverage, and FHS passed it
@@ -220,4 +302,90 @@ with long-run volatility) is the principled fix for the conditional problem.
 Tuning one until the conditional table looks good on these same ~2,100 days
 would be overfitting. **Pre-register it, fit on 2017–2020, test on 2020–2026**,
 and score conditional coverage as part of the primary test — not as a
-supplement.
+supplement. → Done: see Corridor v2 below.
+
+---
+
+## Corridor v2 — pre-registration
+
+**Written 2026-10-08, before running on real data.** The rule and threshold
+below are frozen in `scripts/test_vol_corridor_v2.py`. Results will be added
+underneath without editing this section.
+
+### What changes
+
+Only the volatility forecast. FHS, the expanding pool of past standardised
+returns, the 365-day warm-up, the test dates and the regime split are the
+same for both models, so any difference comes from the vol model.
+
+| | h-day variance forecast |
+|---|---|
+| **v1** | EWMA λ=0.94; flat: h × σ²ₜ |
+| **v2** | GARCH(1,1) with variance targeting to a **trailing 365-day** mean of r²: vₜ = (1−a−b)·LRₜ + a·rₜ² + b·vₜ₋₁. Term structure h·LR + (v−LR)·(1−φʰ)/(1−φ), φ=a+b. In calm spells (v < LR) the forecast widens toward the long-run level |
+
+The long-run level is trailing rather than full-sample because crypto vol has
+fallen since 2017. A long-run level fixed from 2017–2020 would be stale and
+would over-widen every later band.
+
+### Design
+
+- **Out of sample.** a, b fitted by Gaussian QMLE on `taker_flow` spot closes
+  through **2020-10-31**, per asset, then frozen. Test: **2020-11-01 → last
+  date** in `taker_flow`. Same dates and same FHS pool for both models.
+- **PRIMARY:** 14d, 90% band, BTC and ETH. Regimes = terciles of EWMA vol on
+  the test dates — the same split for both models.
+
+### Hypotheses and priors
+
+| | prediction | prior |
+|---|---|---|
+| **H5** | v2 calm-regime coverage closer to 90% than v1 | yes |
+| **H6** | v2 storm-regime coverage closer to 90% | unsure — a trailing LR stays high for a year after a storm and may keep v2 too wide |
+| **H7** | v2 keeps unconditional calibration (Kupiec p > 0.05) | yes |
+| **H8** | half-life of a vol shock 1–4 weeks (φ ≈ 0.95–0.98) | roughly |
+
+### Decision rule
+
+v2 is **ADOPTED** only if, on **both** assets:
+
+- **(a)** calm improvement D = |cov_calm(v1) − 90%| − |cov_calm(v2) − 90%|
+  exceeds **T_CALM = 4.12 points**;
+- **(b)** conditional calibration error (mean |coverage − 90%| over calm, mid
+  and storm) is lower for v2;
+- **(c)** v2 passes Kupiec (p > 0.05) at 80, 90 and 95%, 14d,
+  non-overlapping — the standard v1 was held to.
+
+Supplementary, outside the rule: McNemar on non-overlapping calm windows, 7d
+results, storm coverage, band width, calm-regime dip/run exceedance.
+
+**No rescue.** If v2 is not adopted, alternatives thought of afterwards
+(other long-run windows, other models) are recorded as limitations, not run
+as new tests. `--lr-window` exists only for a labelled sensitivity run, which
+gives no verdict.
+
+### Calibrating the rule (synthetic, before real data)
+
+200 paths per world, each 3,300 days, fitted on the first 1,170 (matching
+2017-08 → 2020-10), Student-t(4) innovations, single asset:
+
+| world | what it is | D median | rule passes |
+|---|---|---|---|
+| **null** | EWMA-like GARCH (a=.06, b=.939): v1 is the correct model | +0.5 pts (95th pct **+4.12** → T_CALM) | **4.5%** = false positives per asset |
+| **alt** | mean-reverting GARCH (a=.10, b=.85; half-life ≈ 2 weeks) | +2.8 pts | **28.5%** = power per asset |
+
+The fit recovers persistence on these paths (median φ 0.955 vs true 0.95;
+0.994 vs 0.999), but single ~800-day fits are noisy: about 1 in 10 lands
+below 0.90, and one seed gave 0.66. The real run prints a warning if a fit
+hits a grid boundary.
+
+**Power is low, and that limits what a negative result can mean.** In the
+synthetic "alt" world, v1's calm coverage was 84%; in the real data it was
+~78%. The real effect is larger, so real power is probably higher than
+28.5%. Even so, **NOT ADOPTED would be weak evidence that v2 is useless** and
+will be recorded that way, not as "mean reversion doesn't matter". Kupiec
+alone fails a correct model ~15% of the time (three levels at 5% each). That
+cost to power is accepted because v1 was held to the same standard.
+
+### Results
+
+*(to be added after the real run)*

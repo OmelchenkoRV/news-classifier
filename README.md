@@ -36,6 +36,8 @@ strategy. Every claim below is qualified by what is actually known.
 | | Result | Doc |
 |---|---|---|
 | Volatility corridor (FHS) | **Calibrated** — Kupiec p > 0.05 in all 40 cells (BTC/ETH, 7d/14d, 5 levels, 2017+ and 2020+). Gaussian bands fail at 95%/99%. **But conditionally miscalibrated:** a "90%" band covered ~78% in calm regimes and ~96% in storms. Least reliable exactly when it looks narrowest | `FINDINGS_vol_corridor.md` |
+| Move sizes by direction (`--moves`) | "If it falls / if it rises, how far" and the deepest dip / highest run inside the window. Calibrated on average (1-in-5 beaten 18–22%, 1-in-20 5–7%); up-share 50–53% = coin flip. **Same calm-regime failure:** at 7–14d the 1-in-20 levels were beaten 8–14% of the time | `FINDINGS_vol_corridor.md` |
+| Corridor v2 (mean-reverting vol) | **PRE-REGISTERED, awaiting run.** GARCH with a trailing long-run level, fitted 2017–2020, tested 2020+. Rule calibrated on synthetic data: 4.5% false positives, 28.5% power per asset | `FINDINGS_vol_corridor.md` |
 
 **One structural result — substantially withdrawn on rerun:**
 
@@ -182,6 +184,8 @@ tests/         92 passing, 35 skipped
 | `python -m scripts.test_etf_outflows` | ETF outflow extremes → drawdowns; `--calibrate` measures the noise band |
 | `python -m scripts.orderbook_walls` | Full Binance order book, resting-order clusters by price |
 | `python -m scripts.test_vol_corridor` | Volatility-corridor coverage test + today's corridor; `--long` for 2017+ |
+| `python -m scripts.test_vol_corridor --moves` | Move sizes by direction from the latest close, with an out-of-sample check by vol regime |
+| `python -m scripts.test_vol_corridor_v2` | Pre-registered corridor v2 test (mean-reverting vol); `--self-test`, `--calibrate` |
 | `python -m capture.etf_flows` | Daily ETF flows (idempotent) |
 
 ### Analysis queries
@@ -211,6 +215,9 @@ long/short ratio — all positioning work is effectively **single-exchange
 
 ## If this is resumed
 
+0. **Run the pre-registered corridor v2 test** (`test_vol_corridor_v2`,
+   refresh `taker_flow` first) and record the result in
+   `FINDINGS_vol_corridor.md` under the frozen pre-registration.
 1. **Rerun vol targeting on the survivorship-extended universe.** The one
    place a stated conclusion rests on numbers known to be wrong. One-line
    change; the relative effect probably holds.

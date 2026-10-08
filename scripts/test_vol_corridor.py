@@ -63,6 +63,12 @@ USAGE
     python -m scripts.test_vol_corridor --self-test
     python -m scripts.test_vol_corridor                # price_snapshots, 2020-11+
     python -m scripts.test_vol_corridor --long         # taker_flow spot, 2017+
+    python -m scripts.test_vol_corridor --moves        # move sizes up / down
+
+--moves answers "if it falls, how far? if it rises, how far?" from the
+latest close (sizes only — it does not say which way). Use the default
+price source for current numbers; taker_flow is only as fresh as its last
+backfill.
 """
 
 from __future__ import annotations
@@ -443,6 +449,205 @@ def report_implied(prices: pd.Series):
                       f"   (ATM IV {iv:.1%})")
 
 
+# ------------------------------------------------- move sizes by direction
+# "If it falls, how far? If it rises, how far?" — the FHS distribution split
+# by sign. This does NOT forecast direction (ten candidates failed at that);
+# it gives conditional sizes. Two views:
+#   terminal  where price ENDS after h days, split into falls and rises
+#   path      how far it TRAVELS inside h days: deepest dip and highest run
+#             (both usually happen in the same window), on daily closes
+# Every level is checked out of sample (move_backtest) overall and in the
+# current vol regime, because the corridor backtest found calm regimes
+# under-cover.
+MOVE_HORIZONS = (1, 3, 7, 14)
+MOVE_Q = (0.50, 0.80, 0.95)            # typical, 1-in-5, 1-in-20
+KINDS = ("fall", "rise", "dip", "run")
+
+
+def excursions(p: np.ndarray, h: int) -> tuple[np.ndarray, np.ndarray]:
+    """Deepest dip and highest run (log, >= 0) over closes s+1..s+h relative
+    to the close at s. NaN where s+h is beyond the data."""
+    n = len(p)
+    dip = np.full(n, np.nan)
+    run = np.full(n, np.nan)
+    if n > h:
+        lp = np.log(p)
+        rel = (np.lib.stride_tricks.sliding_window_view(lp[1:], h)
+               - lp[:n - h, None])
+        dip[:n - h] = np.maximum(0.0, -rel.min(axis=1))
+        run[:n - h] = np.maximum(0.0, rel.max(axis=1))
+    return dip, run
+
+
+def _move_arrays(p: np.ndarray, h: int):
+    """h-day quantities standardised by EWMA vol at the window start."""
+    sig = ewma_vol(log_returns(p))
+    scale = sig * math.sqrt(h)
+    dip, run = excursions(p, h)
+    return sig, h_returns(p, h) / scale, dip / scale, run / scale
+
+
+def _move_levels(Z, D, U, hist_end: int) -> dict:
+    """Standardised size quantiles from windows completed by t (start
+    s <= t-h, i.e. indices < hist_end). No lookahead."""
+    z = Z[:hist_end]; z = z[np.isfinite(z)]
+    d = D[:hist_end]; d = d[np.isfinite(d)]
+    u = U[:hist_end]; u = u[np.isfinite(u)]
+    nan = np.full(len(MOVE_Q), np.nan)
+    q = lambda a: np.quantile(a, MOVE_Q) if len(a) else nan
+    return {"n": len(z),
+            "p_up": float(np.mean(z > 0)) if len(z) else float("nan"),
+            "fall": q(-z[z < 0]), "rise": q(z[z > 0]),
+            "dip": q(d), "run": q(u)}
+
+
+def move_profile(prices: pd.Series, h: int) -> dict | None:
+    """Move sizes in each direction as of the last close, in fractions
+    (fall/dip negative, rise/run positive). p_up is the historical share of
+    h-day windows that ended up — a base rate, NOT a prediction."""
+    p = prices.values.astype(float)
+    sig, Z, D, U = _move_arrays(p, h)
+    t = len(p) - 1
+    hist_end = t - h + 1
+    if hist_end < WARMUP or not np.isfinite(sig[t]):
+        return None
+    m = _move_levels(Z, D, U, hist_end)
+    if m["n"] < WARMUP:
+        return None
+    s = sig[t] * math.sqrt(h)
+    hist = sig[np.isfinite(sig)]
+    return {"last": float(p[-1]), "date": prices.index[-1].date(), "h": h,
+            "p_up": m["p_up"],
+            "fall": np.exp(-m["fall"] * s) - 1, "rise": np.exp(m["rise"] * s) - 1,
+            "dip": np.exp(-m["dip"] * s) - 1, "run": np.exp(m["run"] * s) - 1,
+            "sig_ann": float(sig[t] * math.sqrt(365)),
+            "sig_pct": float(np.mean(hist < sig[t]))}
+
+
+def regime_of(pct: float) -> str:
+    return "calm" if pct < 1 / 3 else ("storm" if pct > 2 / 3 else "mid")
+
+
+def move_backtest(prices: pd.Series, h: int) -> dict:
+    """Out-of-sample check: how often did the realised size exceed the
+    1-in-5 and 1-in-20 levels forecast at t (expanding window, every day)?
+    Falls are judged only against fall levels, rises against rise levels.
+    Targets 20% and 5%. Windows overlap, so rates are descriptive; split by
+    the vol tercile at t (an evaluation split, as in evaluate())."""
+    p = prices.values.astype(float)
+    sig, Z, D, U = _move_arrays(p, h)
+    hist = sig[np.isfinite(sig)]
+    if len(hist) == 0:
+        return {}
+    terc = np.quantile(hist, [1 / 3, 2 / 3])
+    rows = []                                   # (regime, kind, >1in5, >1in20)
+    for t in range(len(p) - h):
+        hist_end = t - h + 1
+        if hist_end < WARMUP or not (np.isfinite(sig[t]) and np.isfinite(Z[t])):
+            continue
+        m = _move_levels(Z, D, U, hist_end)
+        if m["n"] < WARMUP:
+            continue
+        g = 0 if sig[t] <= terc[0] else (1 if sig[t] <= terc[1] else 2)
+        if Z[t] < 0:
+            rows.append((g, 0, -Z[t] > m["fall"][1], -Z[t] > m["fall"][2]))
+        elif Z[t] > 0:
+            rows.append((g, 1, Z[t] > m["rise"][1], Z[t] > m["rise"][2]))
+        rows.append((g, 2, D[t] > m["dip"][1], D[t] > m["dip"][2]))
+        rows.append((g, 3, U[t] > m["run"][1], U[t] > m["run"][2]))
+    if not rows:
+        return {}
+    a = np.array(rows, dtype=float)
+    out = {"start": prices.index[WARMUP + h - 1].date()}
+    for k, kind in enumerate(KINDS):
+        sel = a[:, 1] == k
+        out[kind] = {"all": (a[sel, 2].mean(), a[sel, 3].mean(), int(sel.sum()))}
+        for g, name in enumerate(("calm", "mid", "storm")):
+            s2 = sel & (a[:, 0] == g)
+            out[kind][name] = ((a[s2, 2].mean(), a[s2, 3].mean(), int(s2.sum()))
+                               if s2.any() else (float("nan"),) * 2 + (0,))
+    return out
+
+
+def report_moves(name: str, prices: pd.Series):
+    print(f"\n{'=' * 84}\n{name}\n{'=' * 84}")
+    if prices.empty:
+        print("  NO DATA")
+        return
+    prof = {h: move_profile(prices, h) for h in MOVE_HORIZONS}
+    p0 = next((v for v in prof.values() if v), None)
+    if p0 is None:
+        print("  not enough history")
+        return
+    last, d = p0["last"], p0["date"]
+    age = (pd.Timestamp.today().normalize() - pd.Timestamp(d)).days
+    stale = f"   WARNING: {age} days old" if age > 3 else ""
+    reg = regime_of(p0["sig_pct"])
+    print(f"  latest price ${last:,.2f} on {d}{stale}")
+    print(f"  volatility now {p0['sig_ann']:.0%} annualised, "
+          f"{p0['sig_pct']:.0%} percentile of its history -> "
+          f"{reg.upper()} regime")
+
+    def cells(v, sign):
+        return "".join(f"{sign + format(abs(x), '.1%'):>9}" for x in v)
+
+    def prices_(v):
+        return "".join(f"{'$' + format(last * (1 + x), ',.0f'):>9}" for x in v)
+
+    print("\n  WHERE IT ENDS after h days, split by direction.  "
+          "'1-in-5' = of the times it\n  went that way, 1 in 5 went "
+          "further than this.  up-share = history, NOT a forecast.")
+    print(f"  {'':<5}{'up-share':>9}   {'IF IT FALLS':<27}   {'IF IT RISES':<27}")
+    print(f"  {'':<5}{'':>9}   {'typical':>9}{'1-in-5':>9}{'1-in-20':>9}   "
+          f"{'typical':>9}{'1-in-5':>9}{'1-in-20':>9}")
+    for h, m in prof.items():
+        if not m:
+            continue
+        print(f"  {str(h) + 'd':<5}{m['p_up']:>9.0%}   {cells(m['fall'], '-')}   "
+              f"{cells(m['rise'], '+')}")
+        print(f"  {'':<5}{'':>9}   {prices_(m['fall'])}   {prices_(m['rise'])}")
+
+    print("\n  HOW FAR IT TRAVELS inside h days: deepest dip and highest run "
+          "on daily closes\n  (intraday wicks go further). Both usually "
+          "happen in the same window. These are\n  over ALL windows, "
+          "including ones that ended the other way, so 'typical' can be\n"
+          "  smaller than the typical fall/rise above.")
+    print(f"  {'':<5}{'':>9}   {'DEEPEST DIP':<27}   {'HIGHEST RUN':<27}")
+    print(f"  {'':<5}{'':>9}   {'typical':>9}{'1-in-5':>9}{'1-in-20':>9}   "
+          f"{'typical':>9}{'1-in-5':>9}{'1-in-20':>9}")
+    for h, m in prof.items():
+        if not m or h == 1:                     # 1d path == 1d terminal
+            continue
+        print(f"  {str(h) + 'd':<5}{'':>9}   {cells(m['dip'], '-')}   "
+              f"{cells(m['run'], '+')}")
+        print(f"  {'':<5}{'':>9}   {prices_(m['dip'])}   {prices_(m['run'])}")
+
+    bts = {h: move_backtest(prices, h) for h in MOVE_HORIZONS}
+    start = next((b["start"] for b in bts.values() if b), None)
+    print(f"\n  BACKTEST: % of cases exceeding the 1-in-5 / 1-in-20 level "
+          f"(targets 20 / 5)\n  expanding window, every day since {start}, "
+          f"overlapping windows — descriptive")
+    hdr = "".join(f"{k:>9}" for k in KINDS)
+    print(f"  {'':<5}{'ALL REGIMES':<36}   {reg.upper() + ' REGIMES (= today)':<36}")
+    print(f"  {'':<5}{hdr}   {hdr}")
+    fmt = lambda c: (f"{f'{c[0] * 100:.0f}/{c[1] * 100:.0f}':>9}" if c[2]
+                     else f"{'n/a':>9}")
+    for h, b in bts.items():
+        if not b:
+            continue
+        left = "".join(fmt(b[k]["all"]) for k in KINDS)
+        right = "".join(fmt(b[k][reg]) for k in KINDS)
+        print(f"  {str(h) + 'd':<5}{left}   {right}")
+    if reg == "calm":
+        print("  Today is CALM. If the right-hand rates sit above 20/5, the "
+              "sizes above are\n  UNDERSTATED for today: vol tends to rise "
+              "out of calm spells faster than EWMA expects.")
+    elif reg == "storm":
+        print("  Today is STORMY. If the right-hand rates sit below 20/5, the "
+              "sizes above are\n  OVERSTATED for today: storms tend to fade "
+              "faster than EWMA expects.")
+
+
 # ----------------------------------------------------------- self-test
 def _garch_sim(n, innov, seed):
     rng = np.random.default_rng(seed)
@@ -502,6 +707,57 @@ def self_test() -> int:
     v14 = implied_vol_at(ts, 14)
     assert 0.50 < v14 < 0.60
     print(f"  [ok] IV percent→decimal; 14d interpolated {v14:.3f} between 7d/30d")
+
+    # 6. Excursions by hand: 100 -> 90 -> 120 -> 110, h=2.
+    dip, run = excursions(np.array([100.0, 90.0, 120.0, 110.0]), 2)
+    assert abs(dip[0] - math.log(100 / 90)) < 1e-12
+    assert abs(run[0] - math.log(120 / 100)) < 1e-12
+    assert dip[1] == 0.0 and abs(run[1] - math.log(120 / 90)) < 1e-12
+    assert np.isnan(dip[2]) and np.isnan(run[3])
+    # path always at least as far as the terminal move, same direction
+    p = g.values
+    D, U = excursions(p, 7)
+    R7 = h_returns(p, 7)
+    ok = np.isfinite(R7)
+    assert np.all(D[ok] >= np.maximum(0, -R7[ok]) - 1e-12)
+    assert np.all(U[ok] >= np.maximum(0, R7[ok]) - 1e-12)
+    print("  [ok] dip/run match a hand example; path >= terminal move")
+
+    # 7. Symmetric GARCH: up-share ~50%, falls ~ rises, levels monotone,
+    #    sizes scale with current vol, no lookahead.
+    m = move_profile(g, 14)
+    assert 0.40 < m["p_up"] < 0.60, m["p_up"]
+    ratio = m["rise"][0] / -m["fall"][0]
+    assert 0.7 < ratio < 1.4, ratio
+    for k in ("fall", "dip"):
+        assert m[k][0] > m[k][1] > m[k][2], (k, m[k])      # negatives
+    for k in ("rise", "run"):
+        assert m[k][0] < m[k][1] < m[k][2], (k, m[k])
+    assert abs(m["dip"][2]) >= abs(m["fall"][2]) * 0.8      # path reaches far
+    rng = np.random.default_rng(9)
+    tail = g.values[-1] * np.exp(np.cumsum(rng.standard_normal(30) * 0.05))
+    g2 = pd.Series(np.r_[g.values, tail],
+                   index=pd.date_range(g.index[0], periods=len(g) + 30))
+    m2 = move_profile(g2, 14)
+    assert abs(m2["fall"][0]) > abs(m["fall"][0]) * 1.5
+    assert m2["sig_pct"] > 0.9 and regime_of(m2["sig_pct"]) == "storm"
+    # no lookahead: levels at t0 unchanged when prices after t0 are altered
+    t0, h = 2000, 14
+    pa = g.values.copy(); pb = pa.copy(); pb[t0 + 1:] *= 2.5
+    la = _move_levels(*_move_arrays(pa, h)[1:], t0 - h + 1)
+    lb = _move_levels(*_move_arrays(pb, h)[1:], t0 - h + 1)
+    assert all(np.array_equal(la[k], lb[k]) for k in KINDS), "move levels leaked"
+    print(f"  [ok] symmetric GARCH: up-share {m['p_up']:.0%}, rise/fall "
+          f"{ratio:.2f}; levels monotone; storm tail widens sizes")
+
+    # 8. Out-of-sample calibration on stationary GARCH: ~20% / ~5%.
+    b = move_backtest(g, 7)
+    for k in KINDS:
+        r5, r20, n = b[k]["all"]
+        assert abs(r5 - 0.20) < 0.05 and abs(r20 - 0.05) < 0.03, (k, r5, r20)
+    print("  [ok] backtest on GARCH: " + ", ".join(
+        f"{k} {b[k]['all'][0]:.0%}/{b[k]['all'][1]:.0%}" for k in KINDS)
+        + "  (targets 20%/5%)")
     print("SELF-TEST PASSED")
     return 0
 
@@ -512,11 +768,22 @@ def main() -> int:
     ap.add_argument("--long", action="store_true",
                     help="Use taker_flow spot closes (2017+) instead of "
                          "price_snapshots (2020-11+). More regimes.")
+    ap.add_argument("--moves", action="store_true",
+                    help="Move sizes from the latest close: if it falls, how "
+                         "far; if it rises, how far; deepest dip and highest "
+                         "run inside the window; with an out-of-sample check.")
     a = ap.parse_args()
     if a.self_test:
         return self_test()
     src = "taker_flow spot (2017+)" if a.long else "price_snapshots (2020-11+)"
     print(f"Price source: {src}")
+    if a.moves:
+        for name, sym in (("BTC", "BTCUSDT"), ("ETH", "ETHUSDT")):
+            report_moves(f"{name}  ({sym})", load_closes(sym, a.long))
+        print("\nSizes, not direction. A sizing input (stops, position size, "
+              "liquidation distance),\nnot a trading signal. 'typical' = "
+              "median; levels are FHS on EWMA vol, 365-day warm-up.")
+        return 0
     eth = None
     for name, sym in (("BTC", "BTCUSDT"), ("ETH", "ETHUSDT")):
         px = load_closes(sym, a.long)
