@@ -142,18 +142,28 @@ def _ts(s: str) -> datetime:
     return datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
 
 
-def parse_zip(raw: bytes) -> dict[datetime, dict[int, tuple[float, float]]]:
-    """{timestamp: {pct: (depth, notional)}}"""
-    snaps: dict = defaultdict(dict)
+def _csv_texts(raw: bytes) -> list[str]:
     with zipfile.ZipFile(io.BytesIO(raw)) as z:
-        for name in z.namelist():
-            if not name.endswith(".csv"):
+        return [z.read(n).decode("utf-8-sig", "replace") for n in z.namelist()
+                if n.lower().endswith(".csv")]
+
+
+def parse_zip(raw: bytes) -> dict[datetime, dict[int, tuple[float, float]]]:
+    """{timestamp: {pct: (depth, notional)}}. Percentages may be written as
+    -1, -1.0 or -1.00; non-integer percentages and the header are skipped."""
+    snaps: dict = defaultdict(dict)
+    for text in _csv_texts(raw):
+        for row in csv.reader(io.StringIO(text)):
+            if len(row) < 4:
                 continue
-            text = z.read(name).decode("utf-8", "replace")
-            for row in csv.reader(io.StringIO(text)):
-                if len(row) < 4 or not row[1].strip().lstrip("-").isdigit():
-                    continue                                  # header / junk
-                snaps[_ts(row[0])][int(row[1])] = (float(row[2]), float(row[3]))
+            try:
+                pf = float(row[1])
+                depth, notional = float(row[2]), float(row[3])
+            except ValueError:
+                continue                                      # header / junk
+            if abs(pf - round(pf)) > 1e-6 or round(pf) == 0:
+                continue
+            snaps[_ts(row[0])][int(round(pf))] = (depth, notional)
     return snaps
 
 
@@ -249,6 +259,10 @@ def load_symbol(conn, sym: str, start: date | None, end: date | None) -> dict:
             rows, n, bad = aggregate(parse_zip(r.content), refs.get(d))
         except Exception as e:                                # noqa: BLE001
             logger.warning("%s %s: %s", sym, d, e)
+            continue
+        if not n:
+            logger.warning("%s %s: file parsed to 0 snapshots — not marked loaded "
+                           "(run --probe to see the raw format)", sym, d)
             continue
         if rows:
             execute_values(cur, """INSERT INTO bookdepth_15m (ts, pct, notional_mean,
@@ -350,6 +364,10 @@ def self_test() -> int:
     print("  [ok] quality checks: non-monotone depth and crossed implied prices fail")
     assert _ts("1735689600000") == datetime(2025, 1, 1, tzinfo=timezone.utc)
     print("  [ok] timestamps: text and epoch-ms both parsed")
+    alt = [[ts, f"{p:.2f}", d, n] for ts, p, d, n in good]       # "-1.00" style
+    assert len(parse_zip(_zip(alt))) == 3
+    assert parse_zip(_zip([["2025-01-01 00:00:00", "0.50", 1, 1]])) == {}
+    print("  [ok] percentages written as -1.00 parse; fractional ones are skipped")
     print("SELF-TEST PASSED")
     return 0
 
@@ -371,14 +389,29 @@ def main() -> int:
         for sym in syms:
             days = available_days(sym)
             print(f"{sym}: {len(days)} days, {days[0]} … {days[-1]}" if days else f"{sym}: none")
-            if days:
-                key = f"{PREFIX.format(sym=sym)}{sym}-bookDepth-{days[-1].isoformat()}.zip"
-                snaps = parse_zip(requests.get(FILE_BASE + key, timeout=60).content)
+            for d in reversed(days[-5:]):        # newest file may be partial/empty
+                key = f"{PREFIX.format(sym=sym)}{sym}-bookDepth-{d.isoformat()}.zip"
+                r = requests.get(FILE_BASE + key, timeout=60)
+                print(f"  {d}: HTTP {r.status_code}, {len(r.content):,} bytes")
+                if r.status_code != 200:
+                    continue
+                texts = _csv_texts(r.content)
+                lines = texts[0].splitlines() if texts else []
+                print(f"  csv files {len(texts)}, lines {len(lines)}; first lines:")
+                for ln in lines[:4]:
+                    print(f"    {ln}")
+                snaps = parse_zip(r.content)
                 ts = sorted(snaps)
+                if not ts:
+                    print("  -> parsed 0 snapshots from this file; trying the day before")
+                    continue
                 gaps = [(b - a).total_seconds() for a, b in zip(ts, ts[1:])]
-                print(f"  {days[-1]}: {len(ts)} snapshots, median spacing "
-                      f"{sorted(gaps)[len(gaps) // 2] if gaps else 0:.0f}s; first: "
-                      f"{ts[0]} {dict(sorted(snaps[ts[0]].items()))}")
+                bad = sum(not snapshot_ok(snaps[t], None) for t in ts)
+                print(f"  -> {len(ts)} snapshots, median spacing "
+                      f"{sorted(gaps)[len(gaps) // 2] if gaps else 0:.0f}s, failing "
+                      f"internal checks {bad}; first: {ts[0]} "
+                      f"{dict(sorted(snaps[ts[0]].items()))}")
+                break
         return 0
     from config.database import get_connection
     conn = get_connection()

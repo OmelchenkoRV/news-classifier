@@ -136,14 +136,24 @@ day-bootstrap 95% intervals.
 - **Sync rules, self-test:**
   - spot stale snapshot retried, buffered events applied, gap → resync;
   - futures `u < lastUpdateId` dropped, first event straddles the
-    snapshot, broken `pu` chain → resync.
+    snapshot, broken `pu` chain → resync;
+  - exact check: a level changed after the check snapshot is skipped, a
+    corrupted untouched level is caught, a check older than the last
+    resync is refused.
 - **Against a fake exchange with a known true book:**
   - all four books (spot and futures, ETH and BTC) ended **identical to
     the truth**, including after injected dropped messages, which were
     detected and resynced within 0.5 s;
   - added, removed and traded totals matched the truth exactly in steady
     state. The only shortfall was size more than 3% from price, which
-    equalled the recorded off-grid total to the dollar.
+    equalled the recorded off-grid total to the dollar;
+  - the exact check reported 0 mismatches on every check of a clean run;
+    a phantom level planted in one book was reported on the next two
+    checks, which triggered a resync that restored the true book.
+- **Live, first 35 minutes (2026-10-08):** all four books synced on the
+  first try with no resyncs. The original top-40 comparison showed spot
+  0/40 and futures 5–8/40 differing; the futures count was attributed to
+  timing, which the exact check (added the same day) now tests.
 - **Analysis self-test:**
   - cancelled far → CANCELLED (not reached);
   - eaten → FILLED;
@@ -162,4 +172,12 @@ day-bootstrap 95% intervals.
   removed.
 - **Resync windows.** The minute a resync completes mixes trades and
   removals from slightly different spans, so those minutes are censored.
+  Trades arriving during the snapshot round trip (well under a second per
+  sync) are attributed by arrival, not by update id.
+- **Book checks.** Every 15 minutes the top 20 levels per side are checked
+  exactly against a REST snapshot, compared only on levels unchanged since
+  that snapshot. Any mismatch twice in a row forces a resync. Scheduled
+  resyncs are every 24 hours, so learned deep futures levels survive the
+  day. Deep levels outside the check's range are validated only by the
+  `bookDepth` gate.
 - **Market coverage.** Binance only, ETH and BTC only.

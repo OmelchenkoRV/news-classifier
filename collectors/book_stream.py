@@ -26,9 +26,12 @@ Binance's rules for a local order book:
            U <= lastUpdateId <= u; afterwards each event's pu must equal the
            previous event's u, else restart.
 Quantities in events are absolute; 0 removes the level.
-Safety: resync on a crossed book, on reconnect, and every 6 hours; every
-15 minutes the top 20 levels are compared with a fresh REST snapshot and
-the mismatch count is logged.
+Safety: resync on a crossed book, on reconnect, and every 24 hours. Every
+15 minutes an EXACT check: each price level remembers the update id that
+last changed it; a fresh REST snapshot (top 20, lastUpdateId L) is compared
+only on levels NOT changed after L, once the book has processed past L.
+Those must match exactly — expected mismatches: 0. Two consecutive checks
+with any mismatch (BOOK_CHECK_TOLERANCE, default 0) trigger a resync.
 
 Attribution: a reduction of size at a price is "removed"; a trade with
 buyer-is-maker (m=true) hit a resting BID at that price, m=false a resting
@@ -39,7 +42,9 @@ the depth stream excludes, or size replenished within the same 100 ms);
 the analysis clips and reports it. The 100 ms stream carries only each
 level's FINAL size per batch: an order added and cancelled inside one batch
 is invisible. Trades are attributed only while the book is synced, so
-traded and removed always cover the same span.
+traded and removed cover the same span — except during the snapshot round
+trip at each sync (well under a second), where trades are attributed by
+arrival rather than by update id; minutes with a resync are censored.
 
 WHAT IS STORED — ws_book_1m, one row per (market, symbol, minute):
   base, width        bucket id = floor(price / width); arrays cover buckets
@@ -88,8 +93,10 @@ MARKETS = {
 }
 GRID_PCT = 3.0
 FLUSH_SECONDS = int(os.getenv("BOOK_FLUSH_SECONDS", "60"))
-RESYNC_SECONDS = int(os.getenv("BOOK_RESYNC_SECONDS", str(6 * 3600)))
+RESYNC_SECONDS = int(os.getenv("BOOK_RESYNC_SECONDS", str(24 * 3600)))
 CHECK_SECONDS = int(os.getenv("BOOK_CHECK_SECONDS", "900"))
+# exact-check mismatches tolerated; above this in two consecutive checks -> resync
+CHECK_TOLERANCE = int(os.getenv("BOOK_CHECK_TOLERANCE", "0"))
 RETAIN_DAYS = int(os.getenv("BOOK_RETAIN_DAYS", "120"))
 MAX_BUFFER = 20_000
 EPS = 1e-9
@@ -126,6 +133,9 @@ class Book:
         self.market, self.symbol, self.futures, self.width = market, symbol, futures, width
         self.bids: dict[float, float] = {}
         self.asks: dict[float, float] = {}
+        self.level_u: dict[tuple, int] = {}     # (side, price) -> last update id
+        self.base_L = 0
+        self.bad_checks = 0
         self.uid: int | None = None
         self.synced = False
         self.first_after_snap = False
@@ -199,6 +209,8 @@ class Book:
         self.snap_lo = min(self.bids) if self.bids else None
         self.snap_hi = max(self.asks) if self.asks else None
         self.uid = L
+        self.base_L = L                       # changes before this are untracked
+        self.level_u = {}
         self.synced = True
         self.first_after_snap = True
         self.synced_at = time.time()
@@ -242,6 +254,7 @@ class Book:
                     book.pop(p, None)
                 else:
                     book[p] = q
+                self.level_u[(side, p)] = u
         self.uid = u
         if self.events % 20 == 0 and self.bids and self.asks and \
                 max(self.bids) >= min(self.asks):
@@ -293,6 +306,36 @@ class Book:
                    self.resyncs, synced_frac, self.snap_lo, self.snap_hi)
         self._reset_flows()
         return row
+
+
+def exact_check(book: Book, snap: dict) -> tuple[int, int, list]:
+    """Compare book and a REST snapshot (lastUpdateId L) on every level in the
+    snapshot's price range that the book has NOT changed after L. Valid only
+    when book.base_L <= L <= book.uid (the book was loaded no later than the
+    snapshot and has processed past it); otherwise returns None.
+    Returns (compared, skipped, mismatches[(side, p, ours, rest)])."""
+    L = int(snap["lastUpdateId"])
+    if not book.synced or book.uid is None or not (book.base_L <= L <= book.uid):
+        return None
+    rest = {"bid": {float(p): float(q) for p, q in snap["bids"]},
+            "ask": {float(p): float(q) for p, q in snap["asks"]}}
+    n = skipped = 0
+    bad = []
+    for side, mine in (("bid", book.bids), ("ask", book.asks)):
+        r = rest[side]
+        if not r:
+            continue
+        edge = min(r) if side == "bid" else max(r)
+        inside = (lambda p: p >= edge) if side == "bid" else (lambda p: p <= edge)
+        for p in set(r) | {p for p in mine if inside(p)}:
+            if book.level_u.get((side, p), 0) > L:
+                skipped += 1
+                continue
+            n += 1
+            a, b = mine.get(p, 0.0), r.get(p, 0.0)
+            if abs(a - b) > 1e-9 * max(1.0, b):
+                bad.append((side, p, a, b))
+    return n, skipped, bad
 
 
 # ------------------------------------------------------------- runtime
@@ -410,7 +453,7 @@ class MarketRunner:
             backoff = min(60.0, backoff * 2)
 
     async def check(self):
-        """Compare the top 20 levels with REST (diagnostic only)."""
+        """Exact check against a REST snapshot (see module docstring)."""
         while True:
             await asyncio.sleep(CHECK_SECONDS)
             for sym in SYMBOLS:
@@ -422,12 +465,30 @@ class MarketRunner:
                         _rest_get, self.cfg["rest"], {"symbol": sym, "limit": 20})
                 except Exception:                             # noqa: BLE001
                     continue
-                diff = sum(abs(book.bids.get(float(p), 0) - float(q)) > 1e-12
-                           for p, q in snap["bids"])
-                diff += sum(abs(book.asks.get(float(p), 0) - float(q)) > 1e-12
-                            for p, q in snap["asks"])
-                logger.info("%s %s check: %d/40 top levels differ from REST "
-                            "(timing makes a few normal)", self.name, sym, diff)
+                L = int(snap["lastUpdateId"])
+                for _ in range(50):                           # until the book passes L
+                    if book.synced and book.uid is not None and book.uid >= L:
+                        break
+                    await asyncio.sleep(0.1)
+                if not (book.synced and book.uid is not None and book.uid >= L):
+                    logger.info("%s %s check skipped: book behind snapshot", self.name, sym)
+                    continue
+                res = exact_check(book, snap)
+                if res is None:                               # re-synced meanwhile
+                    logger.info("%s %s check skipped: book re-synced during the check",
+                                self.name, sym)
+                    continue
+                n, skipped, bad = res
+                logger.info("%s %s exact check: %d mismatches of %d levels compared "
+                            "(%d skipped: changed after the snapshot)%s", self.name, sym,
+                            len(bad), n, skipped,
+                            "" if not bad else " e.g. " + "; ".join(
+                                f"{s} {p}: ours {a} vs REST {b}" for s, p, a, b in bad[:3]))
+                book.bad_checks = book.bad_checks + 1 if len(bad) > CHECK_TOLERANCE else 0
+                if book.bad_checks >= 2:
+                    book.bad_checks = 0
+                    book.desync("exact check mismatches twice in a row")
+                    asyncio.create_task(self.snapshot(sym))
 
 
 async def flusher(books: dict, writer: Writer):
@@ -520,6 +581,23 @@ def self_test() -> int:
     assert len(r["rest_bid"]) == len(r["trd_ask"]) and r["mid"] == 2401.0
     assert bk.flow["rem_bid"] == {}
     print("  [ok] minute row: arrays aligned on one grid; flows reset after flush")
+    # exact check: levels changed after the snapshot are skipped; others must match
+    bk = Book("futures", "ETHUSDT", True, 2.0)
+    bk.load_snapshot({"lastUpdateId": 100, "bids": [["2400.0", "5"], ["2399.0", "2"]],
+                      "asks": [["2401.0", "4"], ["2402.0", "1"]]})
+    bk.on_depth(_ev(100, 102, b=[("2399.0", "3")], pu=99))
+    bk.on_depth(_ev(103, 105, a=[("2401.0", "6")], pu=102))
+    rest_at_102 = {"lastUpdateId": 102, "bids": [["2400.0", "5"], ["2399.0", "3"]],
+                   "asks": [["2401.0", "4"], ["2402.0", "1"]]}
+    n, sk, bad = exact_check(bk, rest_at_102)
+    assert (n, sk, bad) == (3, 1, []), (n, sk, bad)       # 2401 changed at 105 > 102
+    bk.bids[2400.0] = 4.0                                  # corrupt an unchanged level
+    n, sk, bad = exact_check(bk, rest_at_102)
+    assert bad == [("bid", 2400.0, 4.0, 5.0)], bad
+    bk.load_snapshot({"lastUpdateId": 200, "bids": [["2400.0", "5"]], "asks": [["2401.0", "4"]]})
+    assert exact_check(bk, rest_at_102) is None            # snapshot older than the book's base
+    print("  [ok] exact check: level changed after the snapshot skipped; a corrupted "
+          "untouched level is caught; a check older than the last resync is refused")
     print("SELF-TEST PASSED")
     return 0
 
