@@ -5,6 +5,8 @@
 #   news-classifier  — main live pipeline (RSS poll → classify → trigger → alert)
 #   outcomes-worker  — Phase 5 worker; resolves trigger outcomes from price_snapshots
 #   eth-capture      — pre-breakout snapshot pipeline (separate Dockerfile)
+#   corridor-logger  — forward test of the volatility corridors (daily forecasts,
+#                      written once, scored when each window closes)
 #
 # Usage:
 #   docker compose up -d         # start all in background
@@ -287,6 +289,56 @@ services:
         reservations:
           cpus: '0.1'
           memory: 128M
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "5"
+
+  # ─────────────────────────────────────────────────────────────────
+  # Corridor logger — forward test of the v1 / v3 / c1 corridors
+  # Hourly, idempotent cycle:
+  #   1. tops up daily closes for the 11 universe coins (Binance REST)
+  #      into corridor_closes, and DVOL for BTC/ETH into dvol_daily;
+  #   2. writes each completed day's forecasts ONCE (never revised) to
+  #      corridor_forecasts, with the real-time regime label;
+  #   3. scores windows as they close into corridor_outcomes.
+  # Same image as news-classifier (numpy/pandas/requests already in it).
+  # Tables are created on first run. See scripts/corridor_logger.py and
+  # docs/FINDINGS_vol_corridor.md ("Forward tracking").
+  #
+  # Report at any time:
+  #   docker compose exec corridor-logger python -m scripts.corridor_logger --report
+  # ─────────────────────────────────────────────────────────────────
+  corridor-logger:
+    image: news-classifier:v2
+    container_name: news-classifier-corridor-logger
+    restart: unless-stopped
+    depends_on:
+      - news-classifier
+
+    # No migrations needed — the logger creates its own tables.
+    entrypoint: []
+    command: ["python", "-m", "scripts.corridor_logger", "--loop", "--interval", "3600"]
+
+    env_file:
+      - .env.docker
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.05'
+          memory: 64M
+
+    healthcheck:
+      disable: true
 
     logging:
       driver: "json-file"

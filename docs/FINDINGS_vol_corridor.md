@@ -656,3 +656,222 @@ expects to break. A lead, not a result.
   day's corridors and score them as windows complete.
 - DVOL is a 30-day tenor; the 14d/7d mismatch is absorbed by FHS on
   average, not regime by regime.
+
+---
+
+## Fix 1: regime-conditional FHS (c1) — pre-registration
+
+**Written 2026-10-08, before running on real data** (the coins' price
+history had not yet been loaded). Frozen in
+`scripts/test_vol_corridor_cfhs.py`. Results will be added underneath
+without editing this section.
+
+### The idea
+
+Every model so far tried to *forecast* volatility better, and calm coverage
+stayed at ~76–80%. Calm spells end in jumps that cannot be forecast — but
+their **frequency** can be measured. Past windows that *started* calm already
+contain both the jumps and the selection effect (a low vol estimate is
+disproportionately an under-estimate). So c1 builds a calm day's band only
+from past calm-start windows, and likewise for mid and storm.
+
+c1 changes one thing relative to v1: which past windows enter the FHS pool.
+The regime label at each past start uses only data up to that day: the
+percentile of that day's EWMA vol among all EWMA values so far (calm
+< 1/3, storm > 2/3, needs 365 values). Pools need ≥ 365 windows per regime.
+
+### Why other coins
+
+Conditional FHS was first written down as a limitation after v2's null on
+BTC/ETH, so rule 12 bars testing it on BTC/ETH 2020–2026. The project's own
+universe (`config/universe.py`) minus BTC/ETH gives **9 coins whose corridor
+calibration has never been examined**: BNB, SOL, XRP, ADA, AVAX, LINK, DOT,
+LTC, ATOM. The list comes from that file, not from a choice made here.
+Prices: `taker_flow` spot daily closes from each coin's listing.
+
+### Hypotheses and priors
+
+| | prediction | prior |
+|---|---|---|
+| **H13** | pooled calm coverage closer to 90% under c1 | yes |
+| **H14** | pooled storm coverage closer to 90% | yes |
+| **H15** | unconditional calibration not materially worse | yes |
+| **H16** | calm gain is broad, not one or two coins | yes |
+
+### Decision rule (14d, 90%, pooled across the 9 coins)
+
+c1 is **ADOPTED** only if all hold:
+
+- **(a)** pooled calm improvement D has a one-sided 95% lower bound > 0 by
+  **joint-time** block bootstrap (90-day calendar blocks shared by all
+  coins, so cross-coin correlation is kept; 2,000 resamples);
+- **(b)** pooled conditional calibration error is lower for c1;
+- **(c)** c1 fails Kupiec in **at most 2 more** of the 27 coin × level cells
+  than v1;
+- **(d)** D > 0 in **at least 6 of 9** coins — added because v3's pass rested
+  on a handful of episodes.
+
+**Revision before real data.** (c) originally read "no more Kupiec failures
+than v1". Synthetic calibration showed c1's per-regime pools, a third the
+size, add per-coin noise even when c1 is the better model, and that
+condition alone halved power (84% → 42.5%). The tolerance was set to +2,
+which a correct c1 exceeded 11% of the time and a useless one never did.
+
+### Calibrating the rule (synthetic, before real data)
+
+The synthetic coin panels were 9 coins built to resemble the real ones:
+- a common Student-t factor giving a correlation of about 0.6;
+- their own GARCH(0.10, 0.85) each;
+- staggered listing dates like the real universe.
+
+| world | what c1 sees | result | rule passes |
+|---|---|---|---|
+| **null** | **random** regime labels (pure noise) | D −0.4 pts | **≤ 1.5%** — false positives |
+| **alt** | real labels | calm 84.3% → 87.6%; storm 94.2% → 89.6% | **75%** — power |
+
+**Caveat on the bootstrap.** Its lower bound sat below the true mean in 96%
+of alt panels but only 82% of null panels. It ignores the noise of which
+windows land in each pool, so the synthetic false-positive rate is the
+number to trust, not the bootstrap alone. The rule's protection comes
+mostly from requiring (a) **and** (d).
+
+### Limitations on record
+
+- **Survivors only.** Dead tokens are excluded, and their calm spells ended
+  worst, so the test likely understates calm-period risk.
+- **Not nine independent tests.** The coins move with BTC and share one
+  calendar (2018–2026); the joint bootstrap accounts for that, while a
+  per-coin count does not.
+- **Shorter tests for newer coins.** SOL, DOT and AVAX were listed in 2020,
+  and c1 needs about 4 years of history before it can forecast, so their
+  tests are short.
+- **BTC/ETH evidence for c1 must come from forward tracking**, as must any
+  combination with v3's implied-vol scale.
+- **No rescue:** ideas formed after the result are recorded, not run.
+
+### Results (run 2026-10-08; `taker_flow` spot to 2026-09-30)
+
+**Verdict: c1 ADOPTED** — all four conditions passed. Broad, consistent and
+**small**: it closes about a quarter of the calm gap.
+
+**PRIMARY: 14d, 90%, pooled over 9 coins:**
+
+| | calm | mid | storm | CCE | overall | width |
+|---|---|---|---|---|---|---|
+| v1 | 80.6% | 92.8% | 95.9% | 6.0 | 89.8% | 55.1% |
+| c1 | **82.9%** | 94.6% | **93.3%** | **5.0** | 90.2% | 54.3% |
+
+| rule | result |
+|---|---|
+| (a) pooled calm improvement, joint-bootstrap lower bound > 0 | +2.2 pts, LB +1.4 — pass |
+| (b) pooled CCE lower | 6.0 → 5.0 — pass |
+| (c) Kupiec failures ≤ v1 + 2 | c1 1, v1 0 (of 27) — pass |
+| (d) D > 0 in ≥ 6 of 9 coins | 8 of 9 — pass |
+
+**Per coin (14d, calm coverage v1 → c1, D):** BNB 82.2 → 84.3 (+2.2) · SOL
+78.8 → 79.1 (+0.3) · XRP 80.8 → 84.5 (+3.7) · ADA 80.6 → 82.0 (+1.3) · AVAX
+78.9 → 78.0 (−1.0) · LINK 81.5 → 82.2 (+0.7) · DOT 77.2 → 79.2 (+2.1) · LTC
+83.0 → 85.5 (+2.5) · ATOM 79.1 → 86.3 (+7.1).
+
+**7d (secondary):** calm 82.5% → 84.8%, storm 95.2% → 93.0%, CCE 4.3 → 3.4;
+D > 0 in **9 of 9** coins. Pooled non-overlapping calm windows: c1 fixed 18
+v1 misses and created 3 (14d: 7 vs 2). The McNemar p-values (0.001 and 0.09)
+are optimistic, because the coins are correlated.
+
+### Hypothesis scorecard
+
+| | prediction | result |
+|---|---|---|
+| **H13** | calm closer to 90% | **Yes — small.** +2.2 pts pooled; calm still 82.9% |
+| **H14** | storm closer | **Yes:** 95.9% → 93.3% |
+| **H15** | unconditional calibration not materially worse | **Yes:** overall 89.8% → 90.2%; Kupiec failures 0 → 1 of 27 |
+| **H16** | gain is broad | **Yes:** 8/9 coins at 14d, 9/9 at 7d. Without ATOM (the largest, +7.1) the mean per-coin gain is +1.5 pts, positive in 7 of 8 |
+
+### How much to trust it
+
+- **Stronger than v3 on breadth.** v3's pass rested on about one
+  independent window per asset. c1's gain shows up in 8–9 of 9 coins and at
+  both horizons, and the pooled non-overlapping windows favour it 18 to 3 at
+  7d. Correlated coins make that less than nine confirmations, but it is
+  not a handful of episodes either.
+- **Small in size.** It closed 24% of the calm gap (80.6% → 82.9% against
+  90%). In the synthetic world it closed 58%. Real calm spells hold more
+  surprise than their own history shows.
+- **The mid regime got worse.** 92.8% → 94.6% at 90%, and 82.5% → 86.5% at
+  80%. CCE still improved overall, but c1 moves error around rather than
+  only removing it.
+- **Survivors only.** Dead tokens are excluded, so calm-period risk is
+  probably understated for every model.
+
+### A likely reason the gain is small — recorded, not tested
+
+c1 labels regimes in real time against each coin's whole history, including
+the very volatile months after listing. The evaluation splits each coin's
+test period into thirds. As alt-coin vol fell over the years, many days that
+are "calm" in the evaluation split were "mid" in real time, so they were
+calibrated against the wrong pool. Coverage judged by the **real-time
+label** — the one a user actually sees, and the one `--moves` prints — was
+not part of the pre-registration. It would be a descriptive check, not a
+new verdict.
+
+### What the four fixes add up to
+
+| | calm 14d 90% (before → after) | adopted? |
+|---|---|---|
+| v2 mean-reverting vol (BTC/ETH, 2020+) | 79.7 → 82.5 / 83.1 → 84.1 | no |
+| v3 implied vol (BTC/ETH, 2022+) | 75.8 → 78.8 / 77.3 → 79.9 | yes, narrowly |
+| c1 calm-history calibration (9 coins) | 80.6 → 82.9 | yes |
+
+**Each fix moves calm coverage up 1–3 points; none comes within 7 points
+of 90%.** The calm gap is stubborn. The practical rule therefore stays:
+**in a calm regime, use the 95% band when you need 90%.** Under c1 the 95%
+band covered 89.0% of calm days at 14d and 91.1% at 7d (pooled, 9 coins).
+
+### Use and limits
+
+- c1 is the working method for the 9 alt coins.
+- **BTC/ETH: c1 is unproven** (rule 12 kept it off their data), as is
+  combining it with v3's implied-vol scale. Forward tracking only.
+
+---
+
+## Forward tracking (from 2026-10-08)
+
+Every result above rests on a few dozen independent windows from a period
+now examined many times. From 2026-10-08 the `corridor-logger` service
+(`scripts/corridor_logger.py`, run from `docker-compose.yml`) records each
+day's corridors **before** the outcome exists:
+
+- **What is logged.** v1 and c1 for all 11 universe coins, plus v3 for BTC
+  and ETH, at 7 and 14 days. Each forecast has its 80/90/95% bands, its
+  1-in-5 / 1-in-20 dip and run, the real-time regime label (the one
+  `--moves` prints), EWMA vol and the DVOL/EWMA ratio.
+- **Write-once.** A forecast row is never revised (`ON CONFLICT DO
+  NOTHING`) and carries `code_version`. Changing a model means a new
+  version, reported separately.
+- **Forward only.** The first cycle logs the latest completed day. Catch-up
+  (up to 7 days) fills only gaps after that, and late rows are counted in
+  the report.
+- **Same models as tested.** The service's self-test checks that its levels
+  equal those of `test_vol_corridor_cfhs` (v1, c1) and
+  `test_vol_corridor_iv` (v3) for the same day, to 1e-12.
+- **Scoring.** Each forecast is scored when its window closes:
+  `corridor_outcomes` records the return, deepest dip and highest run, plus
+  a hit or breach flag for each band, dip and run level.
+
+### Evaluation plan, fixed now
+
+- **First formal read at 12 months (2026-10 → 2027-10):** about 26
+  independent 14-day windows per coin. It uses the rules already registered:
+  - v3 vs v1 on BTC/ETH: the bootstrap rule;
+  - c1 vs v1 on all 11 coins: the pooled four-condition rule, which gives
+    BTC/ETH their first evidence for c1.
+- **Primary forward question, as a user experiences it:** when the
+  real-time label says CALM, how often do the 90% and 95% bands hold?
+- **H12 forward split:** a DVOL/EWMA ratio of **1.2** (between the
+  backtest medians 1.19–1.26), fixed now.
+- **Power at 12 months is low,** so the first read is descriptive unless an
+  effect is large. Decisions wait for 24 months.
+
+`python -m scripts.corridor_logger --report` prints coverage so far, by
+model, horizon and real-time regime.
