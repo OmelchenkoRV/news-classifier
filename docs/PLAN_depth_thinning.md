@@ -1,7 +1,7 @@
 # Plan: Does Thin Futures Depth Warn of Bigger Moves?
 
 **Status:** PRE-REGISTERED 2026-10-08, before any `bookDepth` data was
-loaded.
+loaded. **Result (run 2026-10-08): D1 NOT SUPPORTED** — see Results.
 **Data:** `collectors/bookdepth_backfill.py` (Binance USD-M futures
 `bookDepth` archive)
 **Test:** `scripts/test_depth_thinning.py`
@@ -100,6 +100,67 @@ positives stayed at 2% per asset.
 - **Only Binance futures, BTC and ETH.**
 - **No rescue:** definitions are not changed after the result.
 
-## Results
+## Results (run 2026-10-08)
 
-*(to be added after the real run)*
+**Data:** `bookDepth` 2023-01-01 → 2026-10-07. BTC: 1,373 days loaded, 42
+with more than 5% bad snapshots. ETH: 1,374 days, 96. Test days (h = 7)
+2023-03-12 → 2026-09-23 after the 90-day warm-up and quality filters:
+BTC n = 1,248, ETH n = 1,122.
+
+| | BTC | ETH |
+|---|---|---|
+| **D1: ρ(z, S₇), ±1% (primary)** | **+0.048** (−0.039 to +0.163) | **+0.089** (−0.018 to +0.225) |
+| rule: upper bound < 0 | FAIL | FAIL |
+| ±1%, h = 14 | +0.133 (+0.014 to +0.269) | +0.160 (+0.014 to +0.324) |
+| ±2%, h = 7 | +0.034 (−0.051 to +0.145) | +0.088 (+0.003 to +0.206) |
+| ±2%, h = 14 | +0.112 (−0.003 to +0.254) | +0.146 (+0.024 to +0.275) |
+| D2: calm days ρ (±1%, h = 7) | +0.038 (n = 959) | +0.057 (n = 791) |
+| D3: partial ρ given log(DVOL/EWMA) | −0.051 (−0.145 to +0.058) | −0.020 (−0.140 to +0.122) |
+| D4: calm-day v1 7d 90% breaches, thin vs thick | 9.8% (n = 409) vs 13.1% (n = 550) | 9.3% (n = 313) vs 14.0% (n = 478) |
+
+**Verdict (pre-registered, both assets required): D1 NOT SUPPORTED.** Both
+point estimates have the wrong sign.
+
+### Hypothesis scorecard
+
+| | result |
+|---|---|
+| D1 | **Not supported.** ρ positive on both assets. |
+| D2 | The written criterion (ρ_calm < ρ_all) is met on both, but only because both are **positive** and the calm one is less so. It was meant as "the warning is stronger on calm days"; with no warning, it says nothing. **Lesson:** a conditional criterion must state the sign (here: ρ_calm < ρ_all < 0). |
+| D3 | **Not supported.** Intervals include 0. |
+| D4 | (descriptive) On calm days, thin depth went with **fewer** band breaches, not more. |
+
+### The secondary results point the other way
+
+At 14 days (±1%) ρ is positive with intervals clear of zero on both assets:
+thinner-than-usual depth was followed by **lower**-than-expected
+volatility. This is not a finding to act on:
+
+- it is opposite to the hypothesis, and the 4 of 6 secondary intervals
+  that clear zero do so by less than 0.03;
+- it fits the mechanical overlap already listed under Caveats. Depth thins
+  when volatility is high, EWMA is then high too, and volatility mean-
+  reverts, so the following weeks come in below EWMA (S < 0) on thin days.
+  More time means more reversion, so the effect is larger at 14 days than 7.
+  Controlling for implied vol relative to EWMA (D3) removes it: partial ρ
+  −0.05 / −0.02. **This explanation is post hoc and was not tested.**
+- Mean-reverting volatility was already tested as corridor v2 and not
+  adopted.
+
+### What the result rules out
+
+The rule had 85% power at ρ ≈ −0.21. The D1 lower bounds are −0.04 (BTC)
+and −0.02 (ETH). Even after controlling for implied vol (D3) they are
+−0.145 and −0.140. **A moderate warning effect (ρ ≈ −0.15 or stronger) is
+not in this data.** A small one cannot be excluded, but at that size it
+would not move corridor coverage.
+
+### Consequence
+
+- **Fix 3 is closed.** Thin futures depth does not flag which calm spells
+  break. The calm gap stands, and so does the practical rule: in a calm
+  regime, use the 95% band when you need 90%.
+- **No rescue (rule 12):** no other distances, horizons, thresholds or
+  subsets will be tried on this data.
+- The `bookDepth` tables stay in use as the deep-book gate for the futures
+  wall analysis (`--check-stream`).

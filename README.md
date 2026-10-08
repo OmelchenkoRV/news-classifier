@@ -40,6 +40,7 @@ strategy. Every claim below is qualified by what is actually known.
 | Corridor v2 (mean-reverting vol) | **NOT ADOPTED** under its pre-registered rule. GARCH fitted 2017–2020, tested 2020–2026. Calm coverage improved only +2.8 / +1.0 pts (threshold 4.12). It **did** fix the storm side (95.7% → 92.0% BTC, 95.2% → 91.9% ETH; vol-shock half-life 8–10 days) with 11–16% narrower bands — supplementary, not adopted. Calm spells end in jumps that past returns cannot anticipate | `FINDINGS_vol_corridor.md` |
 | Corridor v3 (implied vol, Deribit DVOL) | **ADOPTED — narrowly, with reservations.** Passed all three pre-registered conditions on both assets: calm 75.8% → 78.8% (BTC), 77.3% → 79.9% (ETH); storm closer; bands 6–10% narrower. But calm is **not fixed** (~79%), the gain rests on ~1 independent window per asset, and the bootstrap interval was tighter than any synthetic world. v2 got a similar calm gain under a stricter rule. Supplementary H12: calm days with high implied/realised vol saw v1 breaches 31–36% vs 12–14% — a lead, small counts | `FINDINGS_vol_corridor.md` |
 | Fix 1: regime-conditional FHS (c1) | **ADOPTED — broad but small.** On the 9 never-examined universe coins: pooled calm 80.6% → 82.9% (14d, 90%), storm 95.9% → 93.3%; better calm coverage in 8/9 coins (14d) and 9/9 (7d). Closes ~24% of the calm gap; mid regime got slightly worse. Unproven on BTC/ETH (forward only). **Across v2, v3 and c1, no fix gets calm within 7 pts of 90%** — in calm, use the 95% band for a 90% need | `FINDINGS_vol_corridor.md` |
+| Depth thinning → vol surprise (futures `bookDepth`) | **NOT SUPPORTED** (2026-10-08). Does unusually thin ±1% futures depth precede higher-than-expected volatility? ρ(z, S₇) +0.05 BTC / +0.09 ETH, needed upper bound < 0: wrong sign. Positive 14-day secondaries fit vol mean reversion and vanish after controlling for implied vol. A moderate effect (ρ ≈ −0.15) is ruled out. Fix 3 closed; calm gap unchanged | `PLAN_depth_thinning.md` |
 
 **One structural result — substantially withdrawn on rerun:**
 
@@ -203,6 +204,10 @@ tests/         92 passing, 35 skipped
 | `python -m scripts.corridor_logger` | Forward test service (docker: `corridor-logger`); `--once`, `--loop`, `--report`, `--self-test` |
 | `python -m collectors.wall_capture` | Order book on a fixed price grid every minute (docker: `wall-capture`) |
 | `python -m scripts.wall_fate` | Pre-registered wall test: pulled vs reached, pull rate by distance, do walls hold |
+| `python -m collectors.book_stream` | Live order-book rebuild, spot + futures (docker: `book-stream`, own image `Dockerfile.stream`) |
+| `python -m scripts.wall_fate_stream` | Pre-registered wall test on the rebuilt book: traded vs cancelled, spot and futures |
+| `python -m collectors.bookdepth_backfill` | Binance futures `bookDepth` archive (±1–5% depth, BTC/ETH, ~2023+); `--probe`, `--check-stream` |
+| `python -m scripts.test_depth_thinning` | Pre-registered test: does thin futures depth predict vol surprise? `--self-test`, `--calibrate` |
 | `python -m capture.etf_flows` | Daily ETF flows (idempotent) |
 
 ### Analysis queries
@@ -223,6 +228,8 @@ tests/         92 passing, 35 skipped
 | `dvol_daily` | Deribit DVOL implied vol, BTC/ETH, 2021-03-24 → present (2,024 days each, no gaps) |
 | `corridor_closes` / `corridor_forecasts` / `corridor_outcomes` | Forward test of the corridors, 2026-10-08 → (service-maintained; forecasts write-once) |
 | `ob_book` / `ob_minutes` | Binance spot book (ETH, BTC) on a fixed price grid + 1-minute candles, every minute, from 2026-10-08 |
+| `ws_book_1m` | Rebuilt order book (spot + futures, ETH/BTC), per minute and price bucket: resting / added / removed / traded USD; 120-day retention |
+| `bookdepth_15m` / `bookdepth_days` | Binance futures depth at ±1–5% (15-minute means of quality-checked snapshots), BTC/ETH |
 | `eth_etf_flows` | BTC/ETH/SOL/HYPE daily net flows from ETF launch (602 days) |
 | `eth_snapshots` + `eth_derivatives` | 5-min live capture, 2026-04 → present |
 | `headlines` + `classifications` | ~1.39M GDELT archive headlines, classified |

@@ -821,6 +821,7 @@ new verdict.
 | v2 mean-reverting vol (BTC/ETH, 2020+) | 79.7 → 82.5 / 83.1 → 84.1 | no |
 | v3 implied vol (BTC/ETH, 2022+) | 75.8 → 78.8 / 77.3 → 79.9 | yes, narrowly |
 | c1 calm-history calibration (9 coins) | 80.6 → 82.9 | yes |
+| Fix 3: thin futures depth as a warning (BTC/ETH, 2023+) | — (no warning found) | no: NOT SUPPORTED, `PLAN_depth_thinning.md` |
 
 **Each fix moves calm coverage up 1–3 points; none comes within 7 points
 of 90%.** The calm gap is stubborn. The practical rule therefore stays:
