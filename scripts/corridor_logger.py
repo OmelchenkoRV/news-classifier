@@ -487,8 +487,17 @@ def _log_today(sym: str, latest: list[dict]):
     lo95, hi95 = c * math.exp(work["lo"][2]), c * math.exp(work["hi"][2])
     tip = "  (calm: use the 95% band)" if work["regime"] == "calm" else ""
     logger.info("%-9s %-5s %-5s 14d 90%% %s–%s  95%% %s–%s%s", sym,
-                work["regime"] or "?", work["model"], f"{lo90:,.4g}",
-                f"{hi90:,.4g}", f"{lo95:,.4g}", f"{hi95:,.4g}", tip)
+                work["regime"] or "?", work["model"], _px(lo90), _px(hi90),
+                _px(lo95), _px(hi95), tip)
+
+
+def _px(x: float) -> str:
+    """Price for logs: no scientific notation, 4 significant digits min."""
+    if x >= 1000:
+        return f"{x:,.0f}"
+    if x >= 1:
+        return f"{x:,.2f}"
+    return f"{x:.4g}"
 
 
 def loop(interval: int) -> None:
