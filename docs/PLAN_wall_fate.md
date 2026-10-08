@@ -77,3 +77,89 @@ MOVED walls are reported but excluded from W1.
   needs trade-by-trade data at the wall's price, which isn't captured.
 - **No rescue:** thresholds are not tuned after seeing results. Variants
   run afterwards are labelled exploratory.
+
+---
+
+## Part 2: traded vs cancelled, from the rebuilt book (spot + futures)
+
+**Added 2026-10-08, before any stream data was captured.**
+**Capture:** `collectors/book_stream.py` (docker service `book-stream`)
+**Analysis:** `scripts/wall_fate_stream.py`
+
+The minute snapshots above can tell that a wall vanished and whether price
+got there, but not **why** its size went. The book stream rebuilds the book
+from Binance's 100 ms change stream and its trade stream. Every reduction
+of size at a price is matched against the trades that hit resting orders
+there, so a wall's disappearance splits exactly into **traded** and
+**cancelled**. It also covers perpetual futures, whose public book snapshot
+reaches only about 0.5% (ETH) and 0.2% (BTC) from price.
+
+### Definitions (fixed now)
+
+| | touch zone | baseline band | wall zone | multiple | min USD (ETH / BTC) |
+|---|---|---|---|---|---|
+| spot | < 0.25% | 0.25–2% | 0.25–3% | 5× | $250k / $1M |
+| futures | < 0.05% | 0.05–0.5% | 0.05–3% | 5× | $2M / $5M |
+
+The futures book near price is a dense, smooth ladder, about 6× deeper
+than spot, so its zones are tighter. Episodes (present at ≥ 50% of peak;
+ended after 2 minutes below) are the same as Part 1.
+
+**Fate,** from the flows in the end window:
+- **FILLED:** traded ≥ 50% of the removed size;
+- **MOVED:** mostly cancelled and re-posted within ±3 buckets;
+- **CANCELLED:** otherwise;
+- **CENSORED:** any resync or incomplete sync in the window.
+
+### Futures coverage gate
+
+The local futures book is complete only inside the last REST snapshot.
+Beyond it, only levels that have changed since are known. Primary futures
+results use walls inside the snapshot range. Walls beyond it become primary
+only if the deep book passes a check against Binance's `bookDepth` archive:
+our book must hold ≥ 80% of `bookDepth`'s ±1% notional on ≥ 80% of
+matched minutes.
+
+### Questions
+
+These are read after ≥ 28 days, per market, symbol and side, with
+day-bootstrap 95% intervals.
+
+| | question | claim requires | prior |
+|---|---|---|---|
+| **S1** | Most walls that end are CANCELLED, not FILLED | cancelled share lower bound > 50% | yes |
+| **S2** | Cancellation is likelier as price approaches | cancel-end rate near ÷ far, lower bound > 1 (spot near < 0.5%, far 1–3%; futures near < 0.1%, far 0.2–0.5%) | yes |
+| **S3** | (descriptive) Of cancelled walls, share pulled before price arrived vs at the touch; share of filled walls with hidden size (traded > removed) | — | — |
+
+### Checks done before any real data
+
+- **Sync rules, self-test:**
+  - spot stale snapshot retried, buffered events applied, gap → resync;
+  - futures `u < lastUpdateId` dropped, first event straddles the
+    snapshot, broken `pu` chain → resync.
+- **Against a fake exchange with a known true book:**
+  - all four books (spot and futures, ETH and BTC) ended **identical to
+    the truth**, including after injected dropped messages, which were
+    detected and resynced within 0.5 s;
+  - added, removed and traded totals matched the truth exactly in steady
+    state. The only shortfall was size more than 3% from price, which
+    equalled the recorded off-grid total to the dollar.
+- **Analysis self-test:**
+  - cancelled far → CANCELLED (not reached);
+  - eaten → FILLED;
+  - pulled at the touch → CANCELLED (reached);
+  - resync → CENSORED, re-quote → MOVED;
+  - hidden size counted;
+  - futures zones applied.
+
+### Limits on record
+
+- **100 ms aggregation.** The stream carries only each level's final size
+  per 100 ms batch, so an order added and cancelled inside one batch is
+  invisible.
+- **Excluded order types.** Futures "Retail Price Improvement" orders are
+  left out of the depth stream; trades against them show up as traded >
+  removed.
+- **Resync windows.** The minute a resync completes mixes trades and
+  removals from slightly different spans, so those minutes are censored.
+- **Market coverage.** Binance only, ETH and BTC only.

@@ -1,0 +1,17 @@
+# Small image for collectors/book_stream.py (live order-book reconstruction).
+# Separate from the main image so adding `websockets` does not force a
+# reinstall of torch/transformers.
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY requirements-stream.txt .
+RUN pip install --no-cache-dir -r requirements-stream.txt
+
+COPY config/ ./config/
+COPY collectors/ ./collectors/
+
+CMD ["python", "-m", "collectors.book_stream"]

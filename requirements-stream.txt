@@ -1,0 +1,6 @@
+# Runtime deps for the book-stream container (Dockerfile.stream) only.
+# Kept separate so the main image (torch, transformers) is not rebuilt.
+websockets>=13,<18
+psycopg2-binary>=2.9
+requests>=2.31
+python-dotenv>=1.0

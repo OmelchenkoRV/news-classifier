@@ -9,6 +9,8 @@
 #                      written once, scored when each window closes)
 #   wall-capture     — order book on a fixed price grid every minute (ETH, BTC),
 #                      to test whether walls are pulled before price arrives
+#   book-stream      — live order-book rebuild (spot + futures, ETH/BTC) from Binance's
+#                      change and trade streams: walls traded away vs cancelled
 #
 # Usage:
 #   docker compose up -d         # start all in background
@@ -390,4 +392,51 @@ services:
       driver: "json-file"
       options:
         max-size: "5m"
+        max-file: "5"
+
+  # ─────────────────────────────────────────────────────────────────
+  # Book stream — were walls TRADED AWAY or CANCELLED?
+  # Rebuilds the Binance order book (spot + USD-M futures, ETHUSDT and
+  # BTCUSDT) from the depth@100ms change stream and the aggTrade stream,
+  # with Binance's local-book sync rules (resync on any gap, crossed book,
+  # reconnect, and every 6 h). Each minute writes, per fixed price bucket,
+  # the USD resting / added / removed / traded into ws_book_1m, so every
+  # wall's disappearance splits into traded vs cancelled. ~11 MB/day; rows
+  # older than BOOK_RETAIN_DAYS are deleted.
+  # Own small image (websockets is not in the main image).
+  # Analysis (pre-registered, read after >= 28 days):
+  #   docker compose exec corridor-logger python -m scripts.wall_fate_stream
+  # See docs/PLAN_wall_fate.md.
+  # ─────────────────────────────────────────────────────────────────
+  book-stream:
+    build:
+      context: .
+      dockerfile: Dockerfile.stream
+    image: book-stream:v1
+    container_name: book-stream
+    restart: unless-stopped
+
+    env_file:
+      - .env.docker
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    environment:
+      - BOOK_MARKETS=spot,futures
+      - BOOK_RETAIN_DAYS=120
+
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
         max-file: "5"
