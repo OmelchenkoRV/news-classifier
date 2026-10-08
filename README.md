@@ -37,7 +37,7 @@ strategy. Every claim below is qualified by what is actually known.
 |---|---|---|
 | Volatility corridor (FHS) | **Calibrated** — Kupiec p > 0.05 in all 40 cells (BTC/ETH, 7d/14d, 5 levels, 2017+ and 2020+). Gaussian bands fail at 95%/99%. **But conditionally miscalibrated:** a "90%" band covered ~78% in calm regimes and ~96% in storms. Least reliable exactly when it looks narrowest | `FINDINGS_vol_corridor.md` |
 | Move sizes by direction (`--moves`) | "If it falls / if it rises, how far" and the deepest dip / highest run inside the window. Calibrated on average (1-in-5 beaten 18–22%, 1-in-20 5–7%); up-share 50–53% = coin flip. **Same calm-regime failure:** at 7–14d the 1-in-20 levels were beaten 8–14% of the time | `FINDINGS_vol_corridor.md` |
-| Corridor v2 (mean-reverting vol) | **PRE-REGISTERED, awaiting run.** GARCH with a trailing long-run level, fitted 2017–2020, tested 2020+. Rule calibrated on synthetic data: 4.5% false positives, 28.5% power per asset | `FINDINGS_vol_corridor.md` |
+| Corridor v2 (mean-reverting vol) | **NOT ADOPTED** under its pre-registered rule. GARCH fitted 2017–2020, tested 2020–2026. Calm coverage improved only +2.8 / +1.0 pts (threshold 4.12). It **did** fix the storm side (95.7% → 92.0% BTC, 95.2% → 91.9% ETH; vol-shock half-life 8–10 days) with 11–16% narrower bands — supplementary, not adopted. Calm spells end in jumps that past returns cannot anticipate | `FINDINGS_vol_corridor.md` |
 
 **One structural result — substantially withdrawn on rerun:**
 
@@ -79,7 +79,9 @@ strategy. Every claim below is qualified by what is actually known.
 
 - **The corridor is wrong regime by regime.** Calm-regime bands under-cover
   (~78% at a nominal 90%); storm-regime bands over-cover (~96%). Read a narrow
-  corridor as narrower than its label.
+  corridor as narrower than its label. A pre-registered mean-reverting vol
+  model (v2) fixed the storm side but not the calm side and was not
+  adopted: calm spells end in jumps, which no model on past returns sees.
 
 - **Nothing built here beats buy-and-hold BTC.** On the corrected universe,
   BTC returns 5.61× at ret/vol 0.60; the best overlay config manages 1.99× at
@@ -215,9 +217,9 @@ long/short ratio — all positioning work is effectively **single-exchange
 
 ## If this is resumed
 
-0. **Run the pre-registered corridor v2 test** (`test_vol_corridor_v2`,
-   refresh `taker_flow` first) and record the result in
-   `FINDINGS_vol_corridor.md` under the frozen pre-registration.
+0. **Forward-track v1 vs v2 corridors.** v2's storm-side and width gains
+   were not its registered criterion, so 2020–2026 cannot confirm them;
+   only unseen data can (~26 independent 14-day windows a year).
 1. **Rerun vol targeting on the survivorship-extended universe.** The one
    place a stated conclusion rests on numbers known to be wrong. One-line
    change; the relative effect probably holds.

@@ -386,6 +386,87 @@ will be recorded that way, not as "mean reversion doesn't matter". Kupiec
 alone fails a correct model ~15% of the time (three levels at 5% each). That
 cost to power is accepted because v1 was held to the same standard.
 
-### Results
+### Results (run 2026-10-08; `taker_flow` refreshed through 2026-09-30)
 
-*(to be added after the real run)*
+**Verdict: v2 NOT ADOPTED.** Condition (a) failed on both assets; (b) and (c)
+passed on both.
+
+**Fit (2017-08 → 2020-10, then frozen):** BTC a=0.147, b=0.768, φ=0.915,
+vol-shock half-life **7.9 days**. ETH a=0.108, b=0.825, φ=0.933, **10.0
+days**. No boundary warnings.
+
+**PRIMARY: 14d, 90%, test 2020-11-01 → 2026-09-30 (2,146 days):**
+
+| | calm | mid | storm | CCE | overall | width |
+|---|---|---|---|---|---|---|
+| BTC v1 | 79.7% | 95.2% | 95.7% | 7.1 | 90.2% | 47.8% |
+| BTC v2 | 82.5% | 93.8% | **92.0%** | **4.4** | 89.5% | **40.3%** |
+| ETH v1 | 83.1% | 92.2% | 95.2% | 4.8 | 90.2% | 61.3% |
+| ETH v2 | 84.1% | 91.0% | **91.9%** | **3.0** | 89.0% | **54.7%** |
+
+| rule | BTC | ETH |
+|---|---|---|
+| (a) calm improvement > 4.12 pts | +2.8 — **FAIL** | +1.0 — **FAIL** |
+| (b) CCE lower | 7.1 → 4.4 — pass | 4.8 → 3.0 — pass |
+| (c) v2 Kupiec p > 0.05 at 80/90/95 | 0.41 / 0.50 / 0.91 — pass | 0.30 / 0.87 / 0.91 — pass |
+
+### Hypothesis scorecard
+
+| | prediction | result |
+|---|---|---|
+| **H5** | calm closer to 90% | **Right direction, too small.** +2.8 and +1.0 pts — inside the range the null produces (median +0.5, 95th +4.12). Calm coverage under v2 is still 82.5% / 84.1% |
+| **H6** | storm closer to 90% (prior: unsure) | **Yes, on both, and by more than H5:** 95.7% → 92.0% and 95.2% → 91.9% |
+| **H7** | unconditional calibration kept | **Yes** |
+| **H8** | half-life 1–4 weeks | **Roughly — at the fast end:** 7.9 and 10.0 days (φ 0.915 / 0.933, below the 0.95–0.98 guessed) |
+
+### Supplementary (outside the rule; cannot change the verdict)
+
+- **7d** shows the same pattern: calm 82.9% → 84.5% (BTC), 85.2% → 85.8%
+  (ETH); storm 94.7% → 91.9%, 95.7% → 93.6%. McNemar on BTC 7d calm windows:
+  4 misses fixed, 0 created, p=0.062 — not significant.
+- **Calm-regime dip/run, 14d** (beaten %, target 20/5): BTC dip 29/11 → 24/9,
+  run 27/8 → 22/8; ETH dip 25/7 → 20/7, run 30/10 → 27/10.
+- **Width:** v2's 90% bands are 11–16% narrower on average (80%: 7–11%; 95%:
+  13–22%), with overall coverage within about 1 point of v1's.
+
+### What it means
+
+1. **Mean reversion explains the storm side, not the calm side.** After a
+   spike, volatility decays with a half-life of about 8–10 days, faster than
+   EWMA assumes. v2 captures that and removes most of the storm over-coverage.
+   Calm spells do not end by gradual reversion. They end in jumps, and nothing
+   in past returns anticipates a jump.
+2. **Part of the calm shortfall is a selection effect, not a model failure.**
+   In the synthetic world where EWMA is exactly right, v1's calm coverage was
+   still **85.7%** at a nominal 90%. Conditioning on a low vol *estimate*
+   picks days where the estimate is too low. BTC's calm coverage here (79.7%)
+   sits about 6 pts beyond that; ETH's (83.1%) about 3.
+3. **The calm figure itself moves with the setup.** ETH calm coverage was
+   78.5% in v1's own run (`price_snapshots`, terciles over 2020+) and 83.1%
+   here (`taker_flow`, terciles over the test period, pool from 2018). A
+   several-point swing from setup alone is another reason not to lean on the
+   exact calm numbers.
+4. **The storm and width gains are not adopted (rule 12).** They were not the
+   registered criterion, and the data that showed them cannot also confirm
+   them. They are a hypothesis for data not yet seen.
+
+### What is used now
+
+**v1 stays.** For sizing in a calm regime, the `--moves` calm-regime table is
+the practical correction: at 7–14 days, read the "1-in-20" levels as roughly
+1-in-10 and the "1-in-5" levels as roughly 1-in-3 or 1-in-4.
+
+### Limitations — recorded, not rerun
+
+- **Power.** As registered, 28.5% per asset in the synthetic alt world. NOT
+  ADOPTED is weak evidence about the calm side, and the storm result shows
+  mean reversion matters, just not where it was needed.
+- **Ideas that came after the null**, and so are not to be tested on
+  2020–2026: conditional FHS (residuals drawn only from same-regime windows),
+  other long-run windows, regime-switching or jump models.
+- **What could anticipate a calm breakout** is a forward-looking price of
+  risk: implied volatility. The Deribit capture is ETH-only and began
+  2026-04, too short to test; BTC options are not captured.
+- **The only clean test of v2's storm and width advantage is a forward
+  test** on data not yet seen. At 14 days that is about 26 independent
+  windows a year.
