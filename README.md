@@ -208,6 +208,7 @@ tests/         92 passing, 35 skipped
 | `python -m scripts.wall_fate_stream` | Pre-registered wall test on the rebuilt book: traded vs cancelled, spot and futures |
 | `python -m collectors.bookdepth_backfill` | Binance futures `bookDepth` archive (±1–5% depth, BTC/ETH, ~2023+); `--probe`, `--check-stream` |
 | `python -m scripts.test_depth_thinning` | Pre-registered test: does thin futures depth predict vol surprise? `--self-test`, `--calibrate` |
+| `python -m scripts.wall_heatmap` | Liquidity heatmap of the live rebuilt books (`ws_book_1m`): where walls sit, pulled vs filled markers, walls-now table. `--hours`, `--watch 60`, `--demo`, `--self-test`. Writes `reports/*.html` |
 | `python -m capture.etf_flows` | Daily ETF flows (idempotent) |
 
 ### Analysis queries
