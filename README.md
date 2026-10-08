@@ -38,6 +38,7 @@ strategy. Every claim below is qualified by what is actually known.
 | Volatility corridor (FHS) | **Calibrated** — Kupiec p > 0.05 in all 40 cells (BTC/ETH, 7d/14d, 5 levels, 2017+ and 2020+). Gaussian bands fail at 95%/99%. **But conditionally miscalibrated:** a "90%" band covered ~78% in calm regimes and ~96% in storms. Least reliable exactly when it looks narrowest | `FINDINGS_vol_corridor.md` |
 | Move sizes by direction (`--moves`) | "If it falls / if it rises, how far" and the deepest dip / highest run inside the window. Calibrated on average (1-in-5 beaten 18–22%, 1-in-20 5–7%); up-share 50–53% = coin flip. **Same calm-regime failure:** at 7–14d the 1-in-20 levels were beaten 8–14% of the time | `FINDINGS_vol_corridor.md` |
 | Corridor v2 (mean-reverting vol) | **NOT ADOPTED** under its pre-registered rule. GARCH fitted 2017–2020, tested 2020–2026. Calm coverage improved only +2.8 / +1.0 pts (threshold 4.12). It **did** fix the storm side (95.7% → 92.0% BTC, 95.2% → 91.9% ETH; vol-shock half-life 8–10 days) with 11–16% narrower bands — supplementary, not adopted. Calm spells end in jumps that past returns cannot anticipate | `FINDINGS_vol_corridor.md` |
+| Corridor v3 (implied vol, Deribit DVOL) | **ADOPTED — narrowly, with reservations.** Passed all three pre-registered conditions on both assets: calm 75.8% → 78.8% (BTC), 77.3% → 79.9% (ETH); storm closer; bands 6–10% narrower. But calm is **not fixed** (~79%), the gain rests on ~1 independent window per asset, and the bootstrap interval was tighter than any synthetic world. v2 got a similar calm gain under a stricter rule. Supplementary H12: calm days with high implied/realised vol saw v1 breaches 31–36% vs 12–14% — a lead, small counts | `FINDINGS_vol_corridor.md` |
 
 **One structural result — substantially withdrawn on rerun:**
 
@@ -82,6 +83,9 @@ strategy. Every claim below is qualified by what is actually known.
   corridor as narrower than its label. A pre-registered mean-reverting vol
   model (v2) fixed the storm side but not the calm side and was not
   adopted: calm spells end in jumps, which no model on past returns sees.
+  An implied-vol corridor (v3, Deribit DVOL) was adopted under its own
+  pre-registered rule as the working corridor — sharper and no worse — but
+  it moves calm coverage only from ~76% to ~79%.
 
 - **Nothing built here beats buy-and-hold BTC.** On the corrected universe,
   BTC returns 5.61× at ret/vol 0.60; the best overlay config manages 1.99× at
@@ -188,6 +192,8 @@ tests/         92 passing, 35 skipped
 | `python -m scripts.test_vol_corridor` | Volatility-corridor coverage test + today's corridor; `--long` for 2017+ |
 | `python -m scripts.test_vol_corridor --moves` | Move sizes by direction from the latest close, with an out-of-sample check by vol regime |
 | `python -m scripts.test_vol_corridor_v2` | Pre-registered corridor v2 test (mean-reverting vol); `--self-test`, `--calibrate` |
+| `python -m collectors.dvol_backfill` | Deribit DVOL (30-day implied vol), BTC/ETH daily from 2021-03; `--probe`, `--self-test` |
+| `python -m scripts.test_vol_corridor_iv` | Pre-registered corridor v3 test (implied vol); `--self-test`, `--calibrate` |
 | `python -m capture.etf_flows` | Daily ETF flows (idempotent) |
 
 ### Analysis queries
@@ -205,6 +211,7 @@ tests/         92 passing, 35 skipped
 | `price_snapshots` | 11 survivors + 9 dead tokens, 2020-11 → present |
 | `funding_history` | BTCUSDT/ETHUSDT, 2019-09 → present (~15k rows, **two bear markets**) |
 | `taker_flow` | Taker buy/sell volume, ETH/BTC — futures from 2020, spot from 2017 |
+| `dvol_daily` | Deribit DVOL implied vol, BTC/ETH, 2021-03-24 → present (2,024 days each, no gaps) |
 | `eth_etf_flows` | BTC/ETH/SOL/HYPE daily net flows from ETF launch (602 days) |
 | `eth_snapshots` + `eth_derivatives` | 5-min live capture, 2026-04 → present |
 | `headlines` + `classifications` | ~1.39M GDELT archive headlines, classified |
@@ -217,9 +224,10 @@ long/short ratio — all positioning work is effectively **single-exchange
 
 ## If this is resumed
 
-0. **Forward-track v1 vs v2 corridors.** v2's storm-side and width gains
-   were not its registered criterion, so 2020–2026 cannot confirm them;
-   only unseen data can (~26 independent 14-day windows a year).
+0. **Forward-track the v1, v2 and v3 corridors** (and H12, the
+   implied/realised ratio on calm days). Every corridor result so far rests
+   on a few dozen independent windows from a period already examined;
+   only unseen data can confirm them (~26 independent 14-day windows a year).
 1. **Rerun vol targeting on the survivorship-extended universe.** The one
    place a stated conclusion rests on numbers known to be wrong. One-line
    change; the relative effect probably holds.
@@ -246,9 +254,9 @@ long/short ratio — all positioning work is effectively **single-exchange
   nine universe symbols need `--universe` runs, and stale data here caused a
   real analysis error (see rule 4).
 - GDELT archive checkpoint marks a slot done even on failure — unfixed footgun.
-- `taker_flow` was last refreshed 2026-08-31, so `test_vol_corridor --long`
-  prints a stale "current corridor". Re-run `collectors.taker_flow_backfill`
-  before relying on it.
+- `taker_flow` was refreshed to 2026-09-30 (2026-10-08). The archive is
+  monthly, so it always lags; re-run `collectors.taker_flow_backfill
+  --market spot` before tests that use it.
 
 ---
 

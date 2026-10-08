@@ -470,3 +470,189 @@ the practical correction: at 7–14 days, read the "1-in-20" levels as roughly
 - **The only clean test of v2's storm and width advantage is a forward
   test** on data not yet seen. At 14 days that is about 26 independent
   windows a year.
+
+---
+
+## Corridor v3 (implied volatility, DVOL) — pre-registration
+
+**Written 2026-10-08, after loading DVOL but before comparing it with any
+price outcome.** Frozen in `scripts/test_vol_corridor_iv.py`. Results will be
+added underneath without editing this section.
+
+### Why
+
+v2 showed calm spells end in jumps that past returns cannot anticipate.
+Implied volatility is the options market's forward-looking price of risk —
+the one available input that could, in principle, see a breakout coming.
+`collectors/dvol_backfill.py` loaded Deribit's DVOL (30-day implied vol) for
+BTC and ETH: 2,024 days each, 2021-03-24 → 2026-10-07, no gaps, means 59.7%
+and 73.7%.
+
+### What changes
+
+Only the volatility scale, again. v3 = FHS with scale DVOLₜ/100 × √(h/365);
+v1 = EWMA σₜ × √h. Same FHS machinery, pool start (first DVOL day), 365-day
+warm-up, test dates (~2022-04 → 2026-09) and regime split (EWMA terciles).
+FHS absorbs any variance risk premium and the 30-day-vs-14-day tenor
+mismatch, because the pool holds returns standardised by the same scale.
+
+### Hypotheses and priors
+
+| | prediction | prior |
+|---|---|---|
+| **H9** | v3 calm coverage closer to 90% than v1 | yes |
+| **H10** | v3 storm coverage closer to 90% | yes — implied vol reacts less than EWMA to a spike |
+| **H11** | v3 keeps unconditional calibration | yes |
+| **H12** | (supplementary) on calm days, a high DVOL/EWMA ratio flags more v1 breaches | yes |
+
+### Decision rule
+
+v3 is **ADOPTED** only if, on **both** assets (14d, 90%):
+
+- **(a)** the calm improvement D = |cov_calm(v1) − 90%| − |cov_calm(v3) − 90%|
+  has a one-sided 95% lower bound **> 0**, by moving-block bootstrap over
+  test days (block 90 days, 2,000 resamples, seed 20261008);
+- **(b)** conditional calibration error is lower for v3;
+- **(c)** v3 passes Kupiec (p > 0.05) at 80, 90 and 95%.
+
+The threshold is the data's own sampling noise rather than a synthetic null
+(as in v2), because the information in real implied vol cannot be simulated
+credibly. The *procedure* is checked on synthetic data instead.
+
+### Calibrating the rule (synthetic, before real data)
+
+200 paths per world; GARCH t(4) prices; a synthetic "DVOL" of 2,020 days;
+test ≈ 1,620 days, matching the real layout.
+
+| world | synthetic DVOL | D mean | rule passes | bootstrap honest? |
+|---|---|---|---|---|
+| **null** | EWMA vol × noise — nothing beyond past returns | +0.2 pts (sd 2.2) | **3.5%** = false positives per asset | lower bound below true mean in 96.5% |
+| **alt** | true expected 30-day vol × small noise — perfect knowledge of the vol process | +4.2 pts (calm 83.3% → 89.4%) | **19.0%** = power per asset | 97.0% |
+
+**Power is low.** Even a perfectly informed implied vol, which almost
+closes the calm gap on average, passes only one time in five per asset.
+There are about 40 independent 14-day calm windows in 4.5 years, and that
+is not enough to confirm a 4-point improvement.
+
+- **ADOPTED would be strong evidence.**
+- **NOT ADOPTED will say little** and will be recorded that way.
+
+The real test of implied vol is forward tracking.
+
+### Caveat on record
+
+2022–2026 has already been examined for calm-regime behaviour (v1, v2). v3
+uses a new information source and was not tuned on that period. Even so,
+evidence from it counts for less than a forward test. **No rescue:** ideas
+formed after seeing the result are recorded as limitations.
+
+### Results (run 2026-10-08; prices `taker_flow` to 2026-09-30)
+
+**Verdict: v3 ADOPTED** — all three conditions passed on both assets. **The
+evidence is thinner than the label**; see "How much to trust it" before
+relying on it.
+
+**PRIMARY: 14d, 90%, test 2022-04-07 → 2026-09-30 (1,624 days):**
+
+| | calm | mid | storm | CCE | overall | width |
+|---|---|---|---|---|---|---|
+| BTC v1 | 75.8% | 89.8% | 95.2% | 6.5 | 86.9% | 35.6% |
+| BTC v3 | **78.8%** | 90.8% | 93.9% | **5.3** | 87.8% | **33.4%** |
+| ETH v1 | 77.3% | 88.5% | 95.6% | 6.6 | 87.1% | 49.5% |
+| ETH v3 | **79.9%** | 87.4% | 93.2% | **5.3** | 86.8% | **44.3%** |
+
+| rule | BTC | ETH |
+|---|---|---|
+| (a) calm improvement, bootstrap lower bound > 0 | +3.0 pts, LB +1.3 — pass | +2.6 pts, LB +1.6 — pass |
+| (b) CCE lower | 6.5 → 5.3 — pass | 6.6 → 5.3 — pass |
+| (c) v3 Kupiec p > 0.05 at 80/90/95 | 0.39 / 0.31 / 0.37 — pass | 0.39 / 0.31 / 0.21 — pass |
+
+### Hypothesis scorecard
+
+| | prediction | result |
+|---|---|---|
+| **H9** | calm closer to 90% | **Yes, both — but small.** +3.0 / +2.6 pts; calm coverage still 78.8% / 79.9% |
+| **H10** | storm closer to 90% | **Yes, both:** 95.2% → 93.9%, 95.6% → 93.2% |
+| **H11** | unconditional calibration kept | **Yes** |
+| **H12** | high DVOL/EWMA ratio flags v1 calm breaches | **Yes, both assets, both horizons, large** — see below |
+
+Width: v3 bands are 6–10% narrower at every level, with overall coverage
+unchanged. v3 is at least as good as v1 in nearly every column, and sharper.
+
+### How much to trust it
+
+1. **It does not fix the calm problem.** v3 improves calm coverage by about
+   3 points; a 90% band still covers about 79–80% in calm regimes.
+2. **The improvement rests on very few episodes.** On non-overlapping calm
+   windows (39 BTC, 34 ETH) v3 and v1 differ on **one window per asset**
+   (BTC: v3 fixed 0 misses, created 1; ETH: fixed 1, created 0). The all-days
+   statistic passes because overlapping days add resolution, but the
+   independent events behind it are a handful.
+3. **The real-data bootstrap interval was suspiciously tight.** D minus its
+   lower bound was 1.7 (BTC) and 1.0 (ETH) pts, against 3.3–6.3 in every
+   synthetic world. Percentile bootstraps are known to be over-confident
+   when the effect sits in few clusters. The pass on (a) is less solid than
+   "95%" implies.
+4. **v2 achieved a similar calm gain and was not adopted.** v2 improved BTC
+   calm coverage by +2.8 pts (on 2020-11+) under a stricter rule calibrated
+   against a synthetic null. Part of the different verdicts is the different
+   rules, not the models. Implied vol stays elevated relative to realised
+   vol in calm periods, so v3 may largely capture the same mean reversion as
+   v2 rather than genuine breakout information. Whether implied vol adds
+   anything beyond mean reversion is untested (see limitations).
+5. **v1's calm coverage depends on the period.** 75.8% / 77.3% here
+   (2022-04+), 79.7% / 83.1% in the v2 test (2020-11+), 77–78% in v1's own
+   run. Exact calm figures move by several points with the sample.
+
+**Practical adoption:** v3 replaces v1 as the working corridor for BTC and
+ETH, on the grounds that it is pre-registered-adopted, sharper and no worse
+anywhere — **not** because it solves calm regimes. The calm caveat stands.
+It requires a daily DVOL refresh (`collectors.dvol_backfill`, idempotent).
+
+### H12 — the strongest signal, and why it is still only a lead
+
+On calm days, split at the median DVOL/EWMA ratio, v1's 90% band was
+breached far more often when implied vol sat high above realised vol:
+
+| v1 breach rate, calm days | high ratio | low ratio | split at | ~indep. windows (hi/lo) |
+|---|---|---|---|---|
+| BTC 14d | **36.2%** | 12.2% | 1.26 | 15 / 24 |
+| ETH 14d | **31.0%** | 14.4% | 1.19 | 14 / 20 |
+| BTC 7d | **27.1%** | 11.0% | 1.27 | 33 / 40 |
+| ETH 7d | **25.3%** | 8.4% | 1.19 | 34 / 38 |
+
+Consistent in all four cells and far larger than the synthetic "perfect
+information" world produced (median +3.8 pts). Reasons for caution:
+
+- **Small counts.** At 14d, roughly 5 breaches against 3 in independent
+  windows. The four cells are not independent (correlated assets,
+  overlapping horizons).
+- **Larger than "perfect knowledge" of a GARCH process** — striking, so
+  distrusted. A plausible real mechanism exists (options price scheduled
+  events and jump risk that a GARCH world lacks), but so does a confound:
+  the lowest-EWMA days are where EWMA most under-estimates, and they also
+  have the highest ratio because implied vol has a floor. The split may
+  partly measure "how deep in calm" rather than option-market information.
+
+**On 2026-10-07 both assets were in the LOW-ratio group** (BTC DVOL 37% vs
+EWMA 36%; ETH 48% vs 45%), where v1's calm breach rate was 12–14% at 14d —
+near nominal. If H12 holds, today's calm is not one the options market
+expects to break. A lead, not a result.
+
+### Today's corridor under v3 (2026-10-07)
+
+| | 14d 80% | 14d 95% | 1-in-5 / 1-in-20 dip | 1-in-5 / 1-in-20 run |
+|---|---|---|---|---|
+| BTC $83,201 | $77,206–$90,576 | $71,655–$98,146 | −6.2% / −12.3% | +6.7% / +13.9% |
+| ETH $2,565.50 | $2,303–$2,900 | $2,103–$3,159 | −9.2% / −17.1% | +10.0% / +20.3% |
+
+### Limitations — recorded, not rerun
+
+- **v3 vs v2 head to head** (does implied vol add anything beyond mean
+  reversion?) and **H12 controlled for depth of calm** are new questions
+  formed after seeing this result. They are for forward data, not for
+  2022–2026.
+- **Forward tracking is the real test** for v3, v2 and H12 alike: log each
+  day's corridors and score them as windows complete.
+- DVOL is a 30-day tenor; the 14d/7d mismatch is absorbed by FHS on
+  average, not regime by regime.
