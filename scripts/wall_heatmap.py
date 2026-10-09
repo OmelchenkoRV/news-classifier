@@ -11,6 +11,9 @@ self-contained HTML page:
   - markers where a wall lost at least half its size in one minute:
       x  PULLED  — the size went without trades taking it (cancelled);
       o  FILLED  — trades took at least half of it;
+  - below it, total USD resting on each side within a band around mid
+    (+-0.25 / 0.5 / 1 / 2 / 3%, chosen on the page) and the bid/ask ratio,
+    with "now" tiles; faded where the band reaches past the snapshot edge;
   - beside it, the book right now (bars), and a "walls now" table:
     slots holding at least the wall minimum and 3x the median occupied slot
     within +-0.25% (at least 5 slots each side).
@@ -60,6 +63,7 @@ PARAMS = {
 X_LOCAL = 3.0          # a wall: at least 3x the median occupied slot within +-0.25%
 EVENT_FRAC = 0.5       # a pull/fill marker: at least half the wall gone in one column
 LOCAL_PCT = 0.25       # neighbourhood half-width, at least 5 slots each side
+BANDS = (0.25, 0.5, 1.0, 2.0, 3.0)   # % around mid for bid/ask totals
 PLOTLY_SRC = "https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"
 ORDER = [("ETHUSDT", "futures"), ("ETHUSDT", "spot"),
          ("BTCUSDT", "futures"), ("BTCUSDT", "spot")]
@@ -107,6 +111,23 @@ def _local_median(rest: np.ndarray, w: int) -> np.ndarray:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             return np.nanmedian(win, axis=-1)
+
+
+def depth_totals(rest_bid: np.ndarray, rest_ask: np.ndarray, centres: np.ndarray,
+                 mids: np.ndarray, snap_lo: list, snap_hi: list, band_pct: float):
+    """USD resting on each side within +-band_pct of mid, per column.
+
+    A slot counts if its centre is inside the band. `complete` is False where
+    the band reaches past the snapshot edge on either side: beyond it only
+    levels that changed since the last sync are known, so the total there is
+    a lower bound (and the ratio can lean towards whichever side was learned)."""
+    lo = mids * (1 - band_pct / 100)
+    hi = mids * (1 + band_pct / 100)
+    bid = (rest_bid * (centres[:, None] >= lo[None, :])).sum(axis=0)
+    ask = (rest_ask * (centres[:, None] <= hi[None, :])).sum(axis=0)
+    complete = [bool((sl is None or sl <= l) and (sh is None or sh >= h))
+                for sl, sh, l, h in zip(snap_lo, snap_hi, lo, hi)]
+    return bid, ask, complete
 
 
 def build_panel(rows: list, market: str, symbol: str, range_pct: float = 3.0,
@@ -194,6 +215,17 @@ def build_panel(rows: list, market: str, symbol: str, range_pct: float = 3.0,
                               since=_iso(since), held_from_start=not len(below),
                               partial=bool(partial)))
 
+    centres = prices + width / 2
+    s_lo = [rows[i]["snap_lo"] for i in last]
+    s_hi = [rows[i]["snap_hi"] for i in last]
+    depth = {}
+    for b in BANDS:
+        if b > range_pct:
+            continue
+        bt, at, ok = depth_totals(M["rest_bid"], M["rest_ask"], centres, mid_c, s_lo, s_hi, b)
+        depth[f"{b:g}"] = dict(bid=np.rint(bt).astype(int).tolist(),
+                               ask=np.rint(at).astype(int).tolist(), complete=ok)
+
     rs = [sum(rows[i]["resyncs"] for i in ix) for ix in idx]
     sy = [min((rows[i]["synced"] if rows[i]["synced"] is not None else 1.0) for i in ix)
           for ix in idx]
@@ -202,7 +234,7 @@ def build_panel(rows: list, market: str, symbol: str, range_pct: float = 3.0,
         market=market, symbol=symbol, width=width, minutes_per_col=g,
         times=[_iso(t) for t in times], prices=prices.tolist(),
         mid=[round(float(m), 2) for m in mid_c],
-        snap_lo=[rows[i]["snap_lo"] for i in last], snap_hi=[rows[i]["snap_hi"] for i in last],
+        snap_lo=s_lo, snap_hi=s_hi, depth=depth,
         rest_k=k(rest), add_k=k(add), pulled_k=k(pulled), trd_k=k(trd),
         rest_bid_now=np.rint(M["rest_bid"][:, lx]).tolist(),
         rest_ask_now=np.rint(M["rest_ask"][:, lx]).tolist(),
@@ -243,11 +275,11 @@ __PLOTLY__
 :root{color-scheme:light;
  --page:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
  --grid:#e1e0d9;--axis:#c3c2b7;--border:rgba(11,11,11,.10);
- --s1:#2a78d6;--s1p:#86b6ef;--pulled:#eb6834;--filled:#1baf7a;--warn:#fab219}
+ --s1:#2a78d6;--bid:#1baf7a;--ask:#eb6834;--warn:#fab219}
 @media (prefers-color-scheme:dark){:root{color-scheme:dark;
- --page:#0d0d0d;--surface:#1a1a19;--ink:#fff;--ink2:#c3c2b7;--muted:#898781;
+ --page:#0d0d0d;--surface:#1a1a19;--ink:#ffffff;--ink2:#c3c2b7;--muted:#898781;
  --grid:#2c2c2a;--axis:#383835;--border:rgba(255,255,255,.10);
- --s1:#3987e5;--s1p:#184f95;--pulled:#d95926;--filled:#199e70}}
+ --s1:#3987e5;--bid:#199e70;--ask:#d95926}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--page);color:var(--ink);
  font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -269,14 +301,19 @@ h1{font-size:20px;margin:0 0 4px;font-weight:600}
 .meta{color:var(--ink2);font-size:13px;margin:2px 0 6px}
 .warn{color:var(--ink);font-size:13px;margin:4px 0}
 .warn b{color:var(--warn)}
-.chart{width:100%;height:520px}
+.chart{width:100%;height:780px}
+.tiles{display:flex;gap:32px;flex-wrap:wrap;margin:10px 0 2px}
+.tile .k{color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px}
+.tile .key{display:inline-block;width:14px;height:3px;border-radius:2px}
+.tile .v{font-size:22px;font-weight:600;line-height:1.2}
+.tile .s{color:var(--ink2);font-size:12px}
 table{border-collapse:collapse;width:100%;margin:8px 0 8px;font-size:13px}
 th,td{text-align:right;padding:5px 8px;border-bottom:1px solid var(--grid);
  font-variant-numeric:tabular-nums;white-space:nowrap}
 th{color:var(--muted);font-weight:500}
 th:first-child,td:first-child{text-align:left}
 .tables{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-@media (max-width:900px){.tables{grid-template-columns:1fr}.chart{height:440px}}
+@media (max-width:900px){.tables{grid-template-columns:1fr}.chart{height:640px}}
 .tcap{font-size:13px;font-weight:600;margin:8px 0 0}
 .note{color:var(--muted);font-size:12px;margin:8px 0 0}
 .empty{color:var(--muted);font-size:13px;padding:6px 0}
@@ -287,23 +324,32 @@ th:first-child,td:first-child{text-align:left}
 <div class="filters">
  <span><span class="flabel">Coin</span><span class="seg" id="coin"></span></span>
  <span><span class="flabel">Window</span><span class="seg" id="win"></span></span>
+ <span><span class="flabel">Depth band</span><span class="seg" id="band"></span></span>
 </div>
 <div id="cards"></div>
 <p class="note">Colour: USD resting in each price slot at the end of each column (log scale).
 Markers: a slot that was a wall (at least the wall minimum and 3&times; the median occupied slot within &plusmn;0.25%, at least 5 slots each side)
 and lost at least half its size within one column &mdash; <b>&times; pulled</b> (gone without trades) or
 <b>&#9675; filled</b> (taken by trades). Beyond the snapshot edges only levels that changed since the last
-sync are known, so sizes there are lower bounds (&ldquo;partial&rdquo;). Descriptive only; the
+sync are known, so sizes there are lower bounds (&ldquo;partial&rdquo;). Totals: USD resting within the
+chosen band around mid on each side; ratio = bids &divide; asks (above 1: more resting bids), on a log scale so
+2&times; and &frac12;&times; sit equally far from 1. Totals and ratio are faded where the band reaches past a
+snapshot edge, because they may be incomplete there. Descriptive only; the
 pre-registered tests are in <code>wall_fate_stream.py</code>.</p>
 </main>
 <script>
 const DATA = __DATA__;
 const COINS = [["ETHUSDT","ETH"],["BTCUSDT","BTC"]];
 const WINS = [["1h",1],["3h",3],["6h",6],["All",null]];
-const state = {coin: "ETHUSDT", win: null};
+const BANDS = [["±0.25%","0.25"],["±0.5%","0.5"],["±1%","1"],["±2%","2"],["±3%","3"]];
+const state = {coin: "ETHUSDT", win: null, band: "1"};
 (function readHash(){const h=new URLSearchParams(location.hash.slice(1));
-  if(h.get("coin")) state.coin=h.get("coin"); if(h.get("win")) state.win=h.get("win")==="all"?null:+h.get("win");})();
-function writeHash(){location.hash=`coin=${state.coin}&win=${state.win??"all"}`;}
+  if(h.get("coin")) state.coin=h.get("coin"); if(h.get("win")) state.win=h.get("win")==="all"?null:+h.get("win");
+  if(h.get("band")) state.band=h.get("band");})();
+function writeHash(){location.hash=`coin=${state.coin}&win=${state.win??"all"}&band=${state.band}`;}
+const hexA = (hex,a) => {let h=hex.trim().slice(1); if(h.length===3) h=[...h].map(c=>c+c).join("");
+  const n=parseInt(h,16); return `rgba(${n>>16&255},${n>>8&255},${n&255},${a})`;};
+const bandLabel = () => `±${state.band}%`;
 
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const dark = () => matchMedia("(prefers-color-scheme: dark)").matches;
@@ -322,6 +368,11 @@ function buildFilters(){
     b.onclick=()=>{state.coin=v;writeHash();buildFilters();draw();};return b;}));
   win.replaceChildren(...WINS.map(([l,v])=>{const b=el("button",{"aria-pressed":String(state.win===v)},l);
     b.onclick=()=>{state.win=v;writeHash();buildFilters();applyWindow();};return b;}));
+  const have=new Set(DATA.panels.flatMap(p=>Object.keys(p.depth)));
+  if(!have.has(state.band)) state.band=have.has("1")?"1":[...have][0];
+  document.getElementById("band").replaceChildren(...BANDS.filter(([,v])=>have.has(v)).map(([l,v])=>{
+    const b=el("button",{"aria-pressed":String(state.band===v)},l);
+    b.onclick=()=>{state.band=v;writeHash();buildFilters();draw();};return b;}));
 }
 
 function windowRange(P){
@@ -349,9 +400,9 @@ function panelTraces(P){
   const cdText=cd.map((row,y)=>row.map(c=>[money(c[0]),money(c[1]),money(c[2]),money(c[3]),slot[y]]));
   const heat={type:"heatmap", x:P.times, y:yc, z, customdata:cdText, zmin, zmax,
     colorscale:ramp(), xaxis:"x", yaxis:"y", hoverongaps:false, zsmooth:false,
-    colorbar:{orientation:"h", x:0.42, xanchor:"center", y:-0.2, len:0.5, thickness:10,
+    colorbar:{orientation:"v", x:0.808, xanchor:"left", y:0.71, yanchor:"middle", len:0.5, thickness:10,
       tickvals:ticks, ticktext:ticks.map(e=>e>=9?`$${10**(e-9)}B`:e>=6?`$${10**(e-6)}M`:`$${10**(e-3)}k`), tickfont:{color:css("--ink2"),size:11},
-      title:{text:"resting", side:"left", font:{color:css("--ink2"),size:11}}, outlinewidth:0},
+      title:{text:"resting", side:"top", font:{color:css("--ink2"),size:11}}, outlinewidth:0},
     hovertemplate:"<b>%{customdata[0]}</b> resting<br>%{customdata[4]} · %{x} UTC"+
       "<br>added %{customdata[1]} · pulled %{customdata[2]} · traded %{customdata[3]}<extra></extra>",
     name:"Resting", showlegend:false};
@@ -362,37 +413,75 @@ function panelTraces(P){
   const snap=(k,show)=>({type:"scatter", mode:"lines", x:P.times, y:P[k], xaxis:"x", yaxis:"y",
     line:{color:muted, width:1, shape:"hv"}, connectgaps:false, name:"Snapshot edge",
     legendgroup:"snap", showlegend:show, hoverinfo:"skip"});
-  const ev=(kind,name,symbol,color)=>{const E=P.events.filter(e=>e.kind===kind);
+  const ev=(kind,name,symbol)=>{const E=P.events.filter(e=>e.kind===kind);
+    const open=symbol.endsWith("-open");
     return {type:"scatter", mode:"markers", x:E.length?E.map(e=>e.t):[null], y:E.length?E.map(e=>e.p):[null],
       xaxis:"x", yaxis:"y",
-      name, marker:{symbol, color, size:E.map(e=>Math.max(9,Math.min(22,9+6*Math.log10(Math.max(1,e.usd/P.min_usd))))),
-        line:{color:surface, width:2}},
+      name, marker:{symbol, color:ink, size:E.map(e=>Math.max(10,Math.min(22,10+6*Math.log10(Math.max(1,e.usd/P.min_usd))))),
+        line:{color:open?ink:surface, width:open?2.5:1.5}},
       customdata:E.map(e=>[money(e.usd), money(e.prev)]),
       hovertemplate:`<b>%{customdata[0]}</b> ${kind}<br>of a %{customdata[1]} wall at %{y:,.2f}<br>%{x} UTC<extra></extra>`};};
-  // the book now
-  const yb=[], xb=[], partial=[];
+  // the book now, by side; slots beyond the snapshot edge faded (lower bounds)
   const lo=P.snap_lo.at(-1), hi=P.snap_hi.at(-1);
-  P.prices.forEach((p,i)=>{const v=P.rest_bid_now[i]+P.rest_ask_now[i]; if(v>0){yb.push(p+w/2); xb.push(v);
-    partial.push((lo!=null && p+w<=lo) || (hi!=null && p>=hi));}});
-  const bars=(isPartial,name,color)=>{const ix=xb.map((_,i)=>i).filter(i=>partial[i]===isPartial);
-    return {type:"bar", orientation:"h", x:ix.map(i=>xb[i]), y:ix.map(i=>yb[i]), xaxis:"x2", yaxis:"y",
-      marker:{color, line:{width:0}}, width:w*0.8, name,
-      customdata:ix.map(i=>money(xb[i])), hovertemplate:"<b>%{customdata}</b> now at %{y:,.2f}<extra></extra>"};};
+  const bars=(side,color)=>{const arr=side==="bid"?P.rest_bid_now:P.rest_ask_now, ys=[], xs=[], cs=[], cd=[];
+    P.prices.forEach((p,i)=>{const v=arr[i]; if(v>0){const part=(lo!=null && p+w<=lo)||(hi!=null && p>=hi);
+      ys.push(p+w/2); xs.push(v); cs.push(part?hexA(color,0.4):color);
+      cd.push([money(v), part?" (partial: lower bound)":""]);}});
+    return {type:"bar", orientation:"h", x:xs, y:ys, xaxis:"x2", yaxis:"y", marker:{color:cs, line:{width:0}},
+      width:w*0.8, name:side==="bid"?"Bids":"Asks", legendgroup:side, showlegend:false, customdata:cd,
+      hovertemplate:`<b>%{customdata[0]}</b> ${side}s now at %{y:,.2f}%{customdata[1]}<extra></extra>`};};
   return [heat, halo, mid, snap("snap_lo",true), snap("snap_hi",false),
-          ev("pulled","Wall pulled","x",css("--pulled")), ev("filled","Wall filled","circle",css("--filled")),
-          bars(false,"Book now",css("--s1")), bars(true,"Book now, partial",css("--s1p"))];
+          ev("pulled","Wall pulled","x"), ev("filled","Wall filled","circle-open"),
+          bars("bid",css("--bid")), bars("ask",css("--ask")), ...depthTraces(P)];
+}
+
+function depthTraces(P){
+  const D=P.depth[state.band]; if(!D) return [];
+  const ink=css("--ink"), bidC=css("--bid"), askC=css("--ask"), B=bandLabel();
+  const solid=(arr)=>arr.map((v,i)=>D.complete[i]?v:null);
+  const note=D.complete.map(c=>c?"":"<br>band passes the snapshot edge: may be incomplete");
+  const tot=(side,color)=>{const v=D[side], name=side==="bid"?"Bids":"Asks";
+    const cd=v.map((x,i)=>[money(x), note[i]]);
+    return [{type:"scatter", mode:"lines", x:P.times, y:v, xaxis:"x3", yaxis:"y3", line:{color:hexA(color,0.35), width:2},
+             legendgroup:side, showlegend:false, hoverinfo:"skip"},
+            {type:"scatter", mode:"lines", x:P.times, y:solid(v), xaxis:"x3", yaxis:"y3", connectgaps:false,
+             line:{color, width:2}, name, legendgroup:side, customdata:cd,
+             hovertemplate:`<b>%{customdata[0]}</b> ${name.toLowerCase()} within ${B}<br>%{x} UTC%{customdata[1]}<extra></extra>`}];};
+  const r=D.bid.map((b,i)=>b>0&&D.ask[i]>0?b/D.ask[i]:null);
+  const one=P.times.map(()=>1);
+  const cd=r.map((x,i)=>[x==null?"–":x.toFixed(2), money(D.bid[i]), money(D.ask[i]), note[i]]);
+  // shading: above 1 = more resting bids, below 1 = more resting asks; faint where incomplete
+  const shade=(vals,fn,color,a)=>[
+    {type:"scatter", mode:"lines", x:P.times, y:one, xaxis:"x4", yaxis:"y4", line:{width:0}, hoverinfo:"skip", showlegend:false},
+    {type:"scatter", mode:"lines", x:P.times, y:vals.map(x=>x==null?null:fn(x,1)), xaxis:"x4", yaxis:"y4",
+     fill:"tonexty", fillcolor:hexA(color,a), line:{width:0}, hoverinfo:"skip", showlegend:false}];
+  return [...tot("bid",bidC), ...tot("ask",askC),
+    ...shade(r,Math.max,bidC,0.10), ...shade(r,Math.min,askC,0.10),
+    ...shade(solid(r),Math.max,bidC,0.28), ...shade(solid(r),Math.min,askC,0.28),
+    {type:"scatter", mode:"lines", x:P.times, y:r, xaxis:"x4", yaxis:"y4", line:{color:hexA(ink,0.3), width:1.5},
+     hoverinfo:"skip", showlegend:false},
+    {type:"scatter", mode:"lines", x:P.times, y:solid(r), xaxis:"x4", yaxis:"y4", connectgaps:false,
+     line:{color:ink, width:1.5}, name:"Bid/ask ratio", showlegend:false, customdata:cd,
+     hovertemplate:"<b>%{customdata[0]}</b> bid/ask<br>bids %{customdata[1]} · asks %{customdata[2]}<br>%{x} UTC%{customdata[3]}<extra></extra>"}];
 }
 
 function panelLayout(P){
   const ink2=css("--ink2"), grid=css("--grid"), axis=css("--axis"), surface=css("--surface");
   const ax={gridcolor:grid, linecolor:axis, zeroline:false, tickfont:{color:ink2,size:11}};
   const r=windowRange(P);
-  return {paper_bgcolor:surface, plot_bgcolor:surface, margin:{l:64,r:8,t:8,b:84},
+  const B=bandLabel();
+  return {paper_bgcolor:surface, plot_bgcolor:surface, margin:{l:72,r:8,t:8,b:44},
     font:{family:'system-ui,-apple-system,"Segoe UI",sans-serif', color:ink2, size:12},
-    showlegend:true, legend:{orientation:"h", x:0, y:1.08, font:{size:12,color:ink2}},
-    xaxis:{...ax, domain:[0,0.83], ...(r?{range:r}:{}), title:{text:"UTC", font:{size:11}}},
-    xaxis2:{...ax, domain:[0.86,1], title:{text:"now", font:{size:11}}, tickformat:"~s", tickprefix:"$", nticks:3},
-    yaxis:{...ax, tickformat:",", title:{text:"price", font:{size:11}}},
+    showlegend:true, legend:{orientation:"h", x:0, y:1.05, font:{size:12,color:ink2}},
+    xaxis:{...ax, domain:[0,0.79], anchor:"y", ...(r?{range:r}:{}), showticklabels:false},
+    xaxis3:{...ax, domain:[0,0.79], anchor:"y3", matches:"x", showticklabels:false},
+    xaxis4:{...ax, domain:[0,0.79], anchor:"y4", matches:"x", title:{text:"UTC", font:{size:11}}},
+    xaxis2:{...ax, domain:[0.88,1], anchor:"y", title:{text:"now", font:{size:11}}, tickformat:"~s", tickprefix:"$", nticks:3},
+    yaxis:{...ax, domain:[0.42,1], tickformat:",", title:{text:"price", font:{size:11}}},
+    yaxis3:{...ax, domain:[0.22,0.38], tickformat:"~s", tickprefix:"$", nticks:4, rangemode:"tozero",
+      title:{text:`within ${B}`, font:{size:11}}},
+    yaxis4:{...ax, domain:[0,0.18], type:"log", tickvals:[0.25,0.5,1,2,4], ticktext:["¼","½","1","2","4"],
+      title:{text:"bid/ask", font:{size:11}}},
     hoverlabel:{bgcolor:surface, bordercolor:axis, font:{color:css("--ink"), size:12}},
     bargap:0, hovermode:"closest"};
 }
@@ -412,6 +501,26 @@ function wallTable(P, side){
   box.append(t); return box;
 }
 
+function tiles(P){
+  const D=P.depth[state.band], row=el("div",{class:"tiles"}); if(!D) return row;
+  const n=D.bid.length-1, B=bandLabel(), part=!D.complete[n];
+  const tile=(k,v,s,color)=>{const t=el("div",{class:"tile"}), kk=el("div",{class:"k"});
+    if(color){const sw=el("span",{class:"key"}); sw.style.background=color; kk.append(sw);}
+    kk.append(document.createTextNode(k)); t.append(kk, el("div",{class:"v"},v)); if(s) t.append(el("div",{class:"s"},s)); return t;};
+  const ratio=i=>D.ask[i]>0&&D.bid[i]>0?D.bid[i]/D.ask[i]:null;
+  const r=ratio(n);
+  // the column closest to one hour before the latest
+  const tEnd=new Date(P.times[n].replace(" ","T")+"Z")-3600e3;
+  let j=0; P.times.forEach((t,i)=>{if(new Date(t.replace(" ","T")+"Z")<=tEnd) j=i;});
+  const r1=ratio(j), was=j<n&&r1!=null?` · 1 h ago: ${r1.toFixed(2)}`:"";
+  const lean=r==null?"":r>=1.05?"more resting bids":r<=0.95?"more resting asks":"about balanced";
+  const pnote=part?" · may be incomplete (band passes the snapshot edge)":"";
+  row.append(tile(`Bids within ${B}`, money(D.bid[n]), null, css("--bid")),
+             tile(`Asks within ${B}`, money(D.ask[n]), null, css("--ask")),
+             tile("Bid/ask ratio", r==null?"–":r.toFixed(2), lean+was+pnote));
+  return row;
+}
+
 function draw(){
   const cards=document.getElementById("cards"); cards.replaceChildren();
   const now=Date.now();
@@ -426,6 +535,7 @@ function draw(){
     const age=(now-new Date(P.latest.replace(" ","T")+"Z"))/60e3;
     if(age>5){const p=el("p",{class:"warn"}); p.append(el("b",{},"⚠ Stale: "),
       document.createTextNode(`latest data is ${Math.round(age)} min old — is book-stream running?`)); card.append(p);}
+    card.append(tiles(P));
     const div=el("div",{class:"chart", id:`c-${P.market}-${P.symbol}`}); card.append(div);
     const tabs=el("div",{class:"tables"}); tabs.append(wallTable(P,"ask"), wallTable(P,"bid")); card.append(tabs);
     cards.append(card);
@@ -556,6 +666,19 @@ def self_test() -> int:
     part = {w["lo"]: w["partial"] for w in P["walls"]}
     assert part == {2420.0: False, 2406.0: True}, part
     print("  [ok] a wall beyond the snapshot edge is flagged partial")
+
+    # totals: bids $1M per $2 slot below 2470, asks $2M per slot above
+    bids = np.array([1e6 if (1200 + i) * 2 + 2 <= 2470 else 0.0 for i in range(nb)])
+    asks = np.array([2e6 if (1200 + i) * 2 >= 2470 else 0.0 for i in range(nb)])
+    rows = [row(0, 2470.0, bids, asks, snap=(2400.0, 2519.0)),
+            row(1, 2470.0, bids, asks, snap=(2450.0, 2519.0))]
+    P = build_panel(rows, "futures", "ETHUSDT")
+    d = P["depth"]["1"]       # +-1%: 2445.3 .. 2494.7 -> 12 bid slots, 12 ask slots
+    assert d["bid"] == [12_000_000] * 2 and d["ask"] == [24_000_000] * 2, d
+    assert d["complete"] == [True, False], d["complete"]
+    assert P["depth"]["0.25"]["bid"][0] == 3_000_000, P["depth"]["0.25"]
+    print("  [ok] totals within +-1%: bids $12M, asks $24M (ratio 0.5); "
+          "flagged incomplete once the band passes the snapshot edge")
 
     rows = [row(i, 2470.0, wall, rem=np.full(nb, 1.0)) for i in range(10)]
     P = build_panel(rows, "futures", "ETHUSDT", max_cols=4)
