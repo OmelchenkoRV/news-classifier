@@ -209,6 +209,7 @@ tests/         92 passing, 35 skipped
 | `python -m collectors.bookdepth_backfill` | Binance futures `bookDepth` archive (±1–5% depth, BTC/ETH, ~2023+); `--probe`, `--check-stream` |
 | `python -m scripts.test_depth_thinning` | Pre-registered test: does thin futures depth predict vol surprise? `--self-test`, `--calibrate` |
 | `python -m scripts.wall_heatmap` | Liquidity heatmap of the live rebuilt books (`ws_book_1m`): where walls sit, pulled vs filled markers, walls-now table. `--hours`, `--watch 60`, `--demo`, `--self-test`. Writes `reports/*.html` |
+| `python -m collectors.wall_census` | Every 5 min: wall counts and book shape, spot vs futures, in the range both books show in full; spot walls 0.5–3% out. `--loop` (service `wall-census`), `--once`, `--report`, `--self-test` |
 | `python -m capture.etf_flows` | Daily ETF flows (idempotent) |
 
 ### Analysis queries
@@ -231,6 +232,7 @@ tests/         92 passing, 35 skipped
 | `ob_book` / `ob_minutes` | Binance spot book (ETH, BTC) on a fixed price grid + 1-minute candles, every minute, from 2026-10-08 |
 | `ws_book_1m` | Rebuilt order book (spot + futures, ETH/BTC), per minute and price bucket: resting / added / removed / traded USD; 120-day retention |
 | `bookdepth_15m` / `bookdepth_days` | Binance futures depth at ±1–5% (15-minute means of quality-checked snapshots), BTC/ETH |
+| `wall_census` | Per 5-minute snapshot, per market and coin: slots ≥3x / ≥5x their neighbours in the common zone (ETH ±0.35%, BTC ±0.10%), slot-size spread, bid/ask USD, spot far-zone wall counts |
 | `eth_etf_flows` | BTC/ETH/SOL/HYPE daily net flows from ETF launch (602 days) |
 | `eth_snapshots` + `eth_derivatives` | 5-min live capture, 2026-04 → present |
 | `headlines` + `classifications` | ~1.39M GDELT archive headlines, classified |

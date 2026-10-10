@@ -180,4 +180,21 @@ day-bootstrap 95% intervals.
   resyncs are every 24 hours, so learned deep futures levels survive the
   day. Deep levels outside the check's range are validated only by the
   `bookDepth` gate.
+- **Deep futures walls are under-seen (noted 2026-10-10, before any read).**
+  Beyond the futures snapshot (about ±0.45% ETH, ±0.16% BTC) a level is
+  known only once it changes. A large order that sits untouched never
+  produces an update, so the patient walls are exactly the ones least
+  likely to be seen. Binance also closes each websocket after 24 hours, and
+  the reconnect resyncs the book, so learned deep levels last a day at most.
+  The coverage gate above still decides whether deep futures walls are used.
+- **Futures books are flatter near price.** A live check on 2026-10-10,
+  inside the range both books show in full (ETH ±0.45% in $0.5 slots, BTC
+  ±0.17% in $10 slots): ETH futures slots varied far less than spot (90th
+  percentile 1.6× the median vs 4.3×), with about 1 slot at 3× its
+  neighbours vs about 6 on spot. BTC was flat in both markets (0 vs 0.3).
+  Fewer futures walls under the same rule is therefore expected, not a
+  fault. One snapshot set, weekend morning: not a measure of what is usual.
+  From 2026-10-10 the `wall-census` service repeats this every 5 minutes
+  (ETH ±0.35% in $0.5 slots, BTC ±0.10% in $5 slots, so the zone always
+  fits inside the futures snapshot); `--report` gives the daily table.
 - **Market coverage.** Binance only, ETH and BTC only.
