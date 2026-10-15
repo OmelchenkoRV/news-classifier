@@ -13,9 +13,16 @@ It also covers perpetual futures, whose REST book reaches only ~0.5% (ETH)
 
 HOW
 ---
-Two websocket connections (spot, USD-M futures), each subscribed to
-<sym>@depth@100ms (every book change) and <sym>@aggTrade (every trade) for
-ETHUSDT and BTCUSDT. One local book per (market, symbol), synchronised by
+Subscriptions: <sym>@depth@100ms (every book change) and <sym>@aggTrade
+(every trade) for ETHUSDT and BTCUSDT. Spot carries both on one connection.
+USD-M futures needs two: since Binance's 2026 websocket split, depth is on
+wss://fstream.binance.com/public and trades on .../market. (The legacy
+.../stream URL still sends depth but NO trades — versions before 2026-10-15
+used it, so their futures rows have traded = 0 and must not be used for
+traded-vs-cancelled.) Trade-stream guard: a book only syncs while its
+market's trades are arriving; if no trade arrives for TRADE_SILENCE seconds
+(default 120; ETH and BTC trade many times a second) or the trade
+connection drops, the market's books resync and those minutes are flagged. One local book per (market, symbol), synchronised by
 Binance's rules for a local order book:
   spot     buffer events; REST snapshot (limit 5000); retry if
            lastUpdateId < first buffered U; drop events with u <= lastUpdateId;
@@ -87,13 +94,16 @@ MARKETS = {
     "spot": {"ws": os.getenv("SPOT_WS", "wss://stream.binance.com:9443/stream"),
              "rest": os.getenv("SPOT_REST", "https://api.binance.com") + "/api/v3/depth",
              "limit": 5000, "futures": False},
-    "futures": {"ws": os.getenv("FUT_WS", "wss://fstream.binance.com/stream"),
+    "futures": {"ws": os.getenv("FUT_WS", "wss://fstream.binance.com/public/stream"),
+                "trade_ws": os.getenv("FUT_TRADE_WS", "wss://fstream.binance.com/market/stream"),
                 "rest": os.getenv("FUT_REST", "https://fapi.binance.com") + "/fapi/v1/depth",
                 "limit": 1000, "futures": True},
 }
 GRID_PCT = 3.0
 FLUSH_SECONDS = int(os.getenv("BOOK_FLUSH_SECONDS", "60"))
 RESYNC_SECONDS = int(os.getenv("BOOK_RESYNC_SECONDS", str(24 * 3600)))
+TRADE_SILENCE = int(os.getenv("BOOK_TRADE_SILENCE", "120"))
+CODE_VERSION = "2026-10-15"
 CHECK_SECONDS = int(os.getenv("BOOK_CHECK_SECONDS", "900"))
 # exact-check mismatches tolerated; above this in two consecutive checks -> resync
 CHECK_TOLERANCE = int(os.getenv("BOOK_CHECK_TOLERANCE", "0"))
@@ -151,6 +161,8 @@ class Book:
                                      "trd_bid", "trd_ask")}
         self.hi = self.lo = None
         self.trade_usd = 0.0
+        self.trades_total = getattr(self, "trades_total", 0)
+        self.trades_at_status = getattr(self, "trades_at_status", 0)
         self.events = 0
         self.resyncs = 0
         self.synced_time = 0.0
@@ -268,6 +280,7 @@ class Book:
         if self.synced:      # removals are only seen while synced; keep both
             self._acc("trd_bid" if ev["m"] else "trd_ask", p, p * q)  # on one clock
         self.trade_usd += p * q
+        self.trades_total += 1
         self.hi = p if self.hi is None else max(self.hi, p)
         self.lo = p if self.lo is None else min(self.lo, p)
 
@@ -386,6 +399,16 @@ class MarketRunner:
     def __init__(self, name: str, cfg: dict, books: dict):
         self.name, self.cfg, self.books = name, cfg, books
         self.pending: set[str] = set()
+        self.trades_up = False          # set by the first trade; cleared by silence/drop
+        self.last_trade = 0.0
+
+    def trades_lost(self, why: str):
+        if self.trades_up:
+            logger.warning("%s trade stream lost (%s): books resync once trades return",
+                           self.name, why)
+        self.trades_up = False
+        for sym in SYMBOLS:
+            self.books[(self.name, sym)].desync(f"trade stream lost: {why}")
 
     async def snapshot(self, sym: str):
         """Fetch a snapshot until the book syncs (or the connection drops)."""
@@ -394,6 +417,8 @@ class MarketRunner:
         self.pending.add(sym)
         book = self.books[(self.name, sym)]
         try:
+            while not self.trades_up:                 # never sync without trades
+                await asyncio.sleep(1.0)
             for attempt in range(20):
                 await asyncio.sleep(0.5 if attempt == 0 else min(5.0, 0.5 * attempt))
                 try:
@@ -413,20 +438,42 @@ class MarketRunner:
             self.pending.discard(sym)
 
     async def run(self):
+        tasks = [self.watch_trades()]
+        if self.cfg.get("trade_ws"):              # futures: depth and trades split
+            tasks += [self._conn(self.cfg["ws"], depth=True, trades=False),
+                      self._conn(self.cfg["trade_ws"], depth=False, trades=True)]
+        else:
+            tasks.append(self._conn(self.cfg["ws"], depth=True, trades=True))
+        await asyncio.gather(*tasks)
+
+    async def watch_trades(self):
+        """ETH and BTC trade many times a second: silence means a dead feed."""
+        while True:
+            await asyncio.sleep(15)
+            if self.trades_up and time.time() - self.last_trade > TRADE_SILENCE:
+                self.trades_lost(f"no trade for {TRADE_SILENCE}s")
+
+    async def _conn(self, base: str, depth: bool, trades: bool):
         import websockets
-        streams = "/".join(f"{s.lower()}@depth@100ms/{s.lower()}@aggTrade"
-                           for s in SYMBOLS)
-        url = f"{self.cfg['ws']}?streams={streams}"
+        parts = []
+        for s in SYMBOLS:
+            if depth:
+                parts.append(f"{s.lower()}@depth@100ms")
+            if trades:
+                parts.append(f"{s.lower()}@aggTrade")
+        url = f"{base}?streams={'/'.join(parts)}"
+        what = "depth+trades" if depth and trades else "depth" if depth else "trades"
         backoff = 1.0
         while True:
             try:
                 async with websockets.connect(url, ping_interval=20, ping_timeout=60,
                                               max_size=None, open_timeout=20) as ws:
-                    logger.info("%s connected", self.name)
+                    logger.info("%s connected (%s)", self.name, what)
                     backoff = 1.0
-                    for sym in SYMBOLS:
-                        self.books[(self.name, sym)].desync("connect")
-                        asyncio.create_task(self.snapshot(sym))
+                    if depth:
+                        for sym in SYMBOLS:
+                            self.books[(self.name, sym)].desync("connect")
+                            asyncio.create_task(self.snapshot(sym))
                     async for msg in ws:
                         m = json.loads(msg)
                         d = m.get("data", m)
@@ -441,14 +488,21 @@ class MarketRunner:
                             if not book.synced and sym not in self.pending:
                                 asyncio.create_task(self.snapshot(sym))
                         elif d.get("e") == "aggTrade":
+                            self.last_trade = time.time()
+                            if not self.trades_up:
+                                self.trades_up = True
+                                logger.info("%s trades arriving", self.name)
                             book.on_trade(d)
             except asyncio.CancelledError:
                 raise
             except Exception as e:                            # noqa: BLE001
-                logger.warning("%s connection lost: %s — reconnecting in %.0fs",
-                               self.name, e, backoff)
-            for sym in SYMBOLS:
-                self.books[(self.name, sym)].desync("disconnect")
+                logger.warning("%s %s connection lost: %s — reconnecting in %.0fs",
+                               self.name, what, e, backoff)
+            if trades:
+                self.trades_lost("connection closed")
+            if depth:
+                for sym in SYMBOLS:
+                    self.books[(self.name, sym)].desync("disconnect")
             await asyncio.sleep(backoff)
             backoff = min(60.0, backoff * 2)
 
@@ -503,8 +557,11 @@ async def flusher(books: dict, writer: Writer):
         if int(time.time() // FLUSH_SECONDS) % max(1, 600 // FLUSH_SECONDS) == 0:
             logger.info("status: " + "; ".join(
                 f"{m}/{s} {'synced' if b.synced else 'SYNCING'} "
-                f"{len(b.bids)}b/{len(b.asks)}a resyncs={b.resyncs_total}"
+                f"{len(b.bids)}b/{len(b.asks)}a resyncs={b.resyncs_total} "
+                f"trades={b.trades_total - b.trades_at_status}"
                 for (m, s), b in books.items()))
+            for b in books.values():
+                b.trades_at_status = b.trades_total
 
 
 async def main_async(markets: list[str]):
@@ -515,8 +572,8 @@ async def main_async(markets: list[str]):
     tasks = [asyncio.create_task(r.run()) for r in runners]
     tasks += [asyncio.create_task(r.check()) for r in runners]
     tasks.append(asyncio.create_task(flusher(books, writer)))
-    logger.info("book stream started: %s x %s, flush every %ds",
-                ", ".join(markets), ", ".join(SYMBOLS), FLUSH_SECONDS)
+    logger.info("book stream %s started: %s x %s, flush every %ds",
+                CODE_VERSION, ", ".join(markets), ", ".join(SYMBOLS), FLUSH_SECONDS)
     await asyncio.gather(*tasks)
 
 

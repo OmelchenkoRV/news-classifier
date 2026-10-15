@@ -178,7 +178,12 @@ def build_panel(rows: list, market: str, symbol: str, range_pct: float = 3.0,
 
     # pull / fill markers: a wall at column x-1 that lost >= half by column x
     events = []
+    traded_cols = trd.sum(axis=0) > 0
     for x in range(1, rest.shape[1]):
+        if not traded_cols[x]:
+            # no trades recorded in this column (e.g. futures rows before the
+            # 2026-10-15 websocket fix): pulled vs filled cannot be told apart
+            continue
         prev = rest[:, x - 1]
         wall = (prev >= min_usd) & (prev >= X_LOCAL * lm[:, x - 1])
         for y in np.flatnonzero(wall):
@@ -239,6 +244,7 @@ def build_panel(rows: list, market: str, symbol: str, range_pct: float = 3.0,
         rest_bid_now=np.rint(M["rest_bid"][:, lx]).tolist(),
         rest_ask_now=np.rint(M["rest_ask"][:, lx]).tolist(),
         events=events, walls=walls, min_usd=min_usd,
+        no_trade_cols=int((~traded_cols).sum()),
         resyncs=int(sum(rs)), synced_min=round(float(min(sy)), 3),
         latest=_iso(rows[-1]["minute"]), mid_now=round(mid_now, 2))
 
@@ -528,11 +534,15 @@ function draw(){
     const card=el("section",{class:"card"});
     card.append(el("h2",{},`${P.symbol.replace("USDT","")} ${P.market} — resting liquidity`));
     const ev=P.events.reduce((a,e)=>(a[e.kind]++,a),{pulled:0,filled:0});
+    const noTr=P.no_trade_cols||0;
     card.append(el("p",{class:"meta"},
       `mid ${px(P.mid_now,P.width)} · latest ${P.latest} UTC · ${P.minutes_per_col} min per column · `+
       `wall minimum ${money(P.min_usd)} · in this window: ${ev.pulled} pulled, ${ev.filled} filled · `+
       `resyncs ${P.resyncs}, lowest synced share ${(P.synced_min*100).toFixed(0)}%`));
     const age=(now-new Date(P.latest.replace(" ","T")+"Z"))/60e3;
+    if(noTr>0){const p=el("p",{class:"warn"}); p.append(el("b",{},"⚠ No trades recorded "),
+      document.createTextNode(`in ${noTr} of ${P.times.length} columns: no pulled/filled markers there `+
+      `(futures before the 2026-10-15 book-stream fix had no trade feed).`)); card.append(p);}
     if(age>5){const p=el("p",{class:"warn"}); p.append(el("b",{},"⚠ Stale: "),
       document.createTextNode(`latest data is ${Math.round(age)} min old — is book-stream running?`)); card.append(p);}
     card.append(tiles(P));
@@ -600,6 +610,7 @@ def synthetic(hours: float = 6.0, seed: int = 7, end: datetime | None = None) ->
                     if near and kind == "fill":
                         alive[j] = False; rem[y] += size; trd[y] += size; continue
                     (rb if wp < m else ra)[y] += size
+                trd[int(np.argmin(np.abs(c - m)))] += scale * 0.02   # everyday trading at the touch
                 lo_s, hi_s = m * (1 - reach), m * (1 + reach)
                 if market == "futures":                 # deep book learned over time
                     beyond = (c < lo_s) | (c > hi_s)
@@ -638,7 +649,12 @@ def self_test() -> int:
     gone = flat.copy()
     rem = np.zeros(nb); rem[10] = 19e6
     rows = [row(i, 2470.0, wall) for i in range(5)]
-    rows.append(row(5, 2470.0, gone, rem=rem))                  # pulled, no trades
+    rows.append(row(5, 2470.0, gone, rem=rem))                  # no trades at all recorded
+    P = build_panel(rows, "futures", "ETHUSDT", range_pct=3.0)
+    assert P["events"] == [] and P["no_trade_cols"] == 6, P["events"]
+    print("  [ok] a column with no trades recorded gets no pulled/filled marker")
+    tiny = np.zeros(nb); tiny[30] = 1e3                         # trades elsewhere in the book
+    rows[-1] = row(5, 2470.0, gone, rem=rem, trd=tiny)          # pulled: none traded at 2420
     P = build_panel(rows, "futures", "ETHUSDT", range_pct=3.0)
     y = P["prices"].index(2420.0)
     assert P["rest_k"][y][0] == 20000 and P["rest_k"][y][5] == 1000, "grid mapping"

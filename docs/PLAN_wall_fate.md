@@ -180,6 +180,21 @@ day-bootstrap 95% intervals.
   resyncs are every 24 hours, so learned deep futures levels survive the
   day. Deep levels outside the check's range are validated only by the
   `bookDepth` gate.
+- **Futures trades were missing until 2026-10-15 (found before any read).**
+  Binance split its USD-M futures websocket in 2026: book updates moved to
+  `/public`, trades to `/market`. `book-stream` used the legacy `/stream`
+  URL, which still sends book updates but no trades, so every futures row
+  from 2026-10-08 to the fix has traded = 0 and every reduction looks
+  cancelled. Resting sizes are unaffected (the exact check passed
+  throughout). Consequences, fixed now:
+  - futures S1–S3 use only rows from the first minute with trades recorded
+    (`wall_fate_stream` drops earlier rows and any minute without trades);
+  - the futures read moves to 28 days after the fix (about 2026-11-12);
+    spot is unaffected and keeps its date;
+  - `book-stream` now refuses to sync a market whose trades are not
+    arriving, and resyncs if trades stop for 2 minutes, so a silent trade
+    feed can no longer pass unnoticed. The fake-exchange test could not
+    catch this: it served trades and book updates on one connection.
 - **Deep futures walls are under-seen (noted 2026-10-10, before any read).**
   Beyond the futures snapshot (about ±0.45% ETH, ±0.16% BTC) a level is
   known only once it changes. A large order that sits untouched never

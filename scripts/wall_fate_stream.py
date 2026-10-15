@@ -254,16 +254,29 @@ def load(market: str, symbol: str, days: int | None) -> list[Row]:
         args = (market, symbol, f"{days} days") if days else (market, symbol)
         cur.execute(f"""SELECT minute, mid, width, base, rest_bid, rest_ask, add_bid,
                                add_ask, rem_bid, rem_ask, trd_bid, trd_ask, hi, lo,
-                               resyncs, synced_frac, snap_lo, snap_hi
+                               resyncs, synced_frac, snap_lo, snap_hi, trade_usd
                         FROM ws_book_1m WHERE market = %s AND symbol = %s {cond}
                         ORDER BY minute""", args)
+        rows = cur.fetchall()
+        if market == "futures":
+            # Before 2026-10-15 book-stream read futures trades from Binance's
+            # legacy websocket URL, which no longer sends them: traded = 0 in
+            # every row. Those rows cannot split traded vs cancelled, so the
+            # futures sample starts at the first minute with trades recorded.
+            first = next((i for i, r in enumerate(rows) if (r[18] or 0) > 0), len(rows))
+            if first:
+                print(f"  futures {symbol}: {first} minutes before trades were recorded "
+                      "(legacy websocket, before the 2026-10-15 fix) excluded")
+            rows = rows[first:]
         out = []
-        for r in cur.fetchall():
+        for r in rows:
             keys = ("rest_bid", "rest_ask", "add_bid", "add_ask", "rem_bid", "rem_ask",
                     "trd_bid", "trd_ask")
             arr = {k: np.asarray(v, float) for k, v in zip(keys, r[4:12])}
+            clean = ((r[14] or 0) == 0 and (r[15] or 0) >= 0.999
+                     and (r[18] or 0) > 0)                    # a minute without trades is unusable
             out.append(Row(r[0].timestamp(), r[1], r[2], int(r[3]), arr, r[12], r[13],
-                           (r[14] or 0) == 0 and (r[15] or 0) >= 0.999, r[16], r[17]))
+                           clean, r[16], r[17]))
         return out
     finally:
         conn.close()
