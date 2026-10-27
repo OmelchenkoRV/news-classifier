@@ -195,6 +195,14 @@ day-bootstrap 95% intervals.
     arriving, and resyncs if trades stop for 2 minutes, so a silent trade
     feed can no longer pass unnoticed. The fake-exchange test could not
     catch this: it served trades and book updates on one connection.
+- **Trade-feed gaps are recorded per minute (from 2026-10-27).** A
+  stalled futures trade socket (about 35 minutes on 27 October) used to
+  stop the books syncing, losing depth too. Now the books stay synced,
+  the socket is reopened after 2 silent minutes, and each row records
+  `trade_gap_s`; `wall_fate_stream` uses only rows with no gap. Minutes
+  around the 26 October sell-off, when one process fell behind and its
+  connections dropped (13:54–14:44 UTC), carry resyncs and are censored
+  as before. Spot and futures now run in separate containers.
 - **Deep futures walls are under-seen (noted 2026-10-10, before any read).**
   Beyond the futures snapshot (about ±0.45% ETH, ±0.16% BTC) a level is
   known only once it changes. A large order that sits untouched never

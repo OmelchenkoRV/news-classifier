@@ -423,7 +423,40 @@ services:
       - "host.docker.internal:host-gateway"
 
     environment:
-      - BOOK_MARKETS=spot,futures
+      - BOOK_MARKETS=spot            # futures runs in book-stream-futures (own CPU)
+      - BOOK_RETAIN_DAYS=120
+
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+
+  # Futures half of the book stream (same image and code as book-stream).
+  book-stream-futures:
+    image: book-stream:v1
+    container_name: book-stream-futures
+    restart: unless-stopped
+
+    env_file:
+      - .env.docker
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    environment:
+      - BOOK_MARKETS=futures         # split from spot 2026-10-27: one Python process
+                                     # fell behind during the 26 Oct sell-off
       - BOOK_RETAIN_DAYS=120
 
     deploy:

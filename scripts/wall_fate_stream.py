@@ -254,7 +254,8 @@ def load(market: str, symbol: str, days: int | None) -> list[Row]:
         args = (market, symbol, f"{days} days") if days else (market, symbol)
         cur.execute(f"""SELECT minute, mid, width, base, rest_bid, rest_ask, add_bid,
                                add_ask, rem_bid, rem_ask, trd_bid, trd_ask, hi, lo,
-                               resyncs, synced_frac, snap_lo, snap_hi, trade_usd
+                               resyncs, synced_frac, snap_lo, snap_hi, trade_usd,
+                               trade_gap_s
                         FROM ws_book_1m WHERE market = %s AND symbol = %s {cond}
                         ORDER BY minute""", args)
         rows = cur.fetchall()
@@ -274,7 +275,8 @@ def load(market: str, symbol: str, days: int | None) -> list[Row]:
                     "trd_bid", "trd_ask")
             arr = {k: np.asarray(v, float) for k, v in zip(keys, r[4:12])}
             clean = ((r[14] or 0) == 0 and (r[15] or 0) >= 0.999
-                     and (r[18] or 0) > 0)                    # a minute without trades is unusable
+                     and (r[18] or 0) > 0                     # a minute without trades is unusable
+                     and (r[19] or 0) == 0)                   # nor one with a trade-feed gap
             out.append(Row(r[0].timestamp(), r[1], r[2], int(r[3]), arr, r[12], r[13],
                            clean, r[16], r[17]))
         return out

@@ -19,10 +19,16 @@ USD-M futures needs two: since Binance's 2026 websocket split, depth is on
 wss://fstream.binance.com/public and trades on .../market. (The legacy
 .../stream URL still sends depth but NO trades — versions before 2026-10-15
 used it, so their futures rows have traded = 0 and must not be used for
-traded-vs-cancelled.) Trade-stream guard: a book only syncs while its
-market's trades are arriving; if no trade arrives for TRADE_SILENCE seconds
-(default 120; ETH and BTC trade many times a second) or the trade
-connection drops, the market's books resync and those minutes are flagged. One local book per (market, symbol), synchronised by
+traded-vs-cancelled.) Trade-feed guard (2026-10-27): if no trade arrives for
+TRADE_SILENCE seconds (default 120; ETH and BTC trade many times a second)
+the trade connection is dropped and reopened. Books stay synced through a
+trade outage — depth is still right — but every row records trade_gap_s,
+the seconds of that minute without a live trade feed; traded-vs-cancelled
+analysis must use only rows with trade_gap_s = 0.
+Load: messages are parsed with orjson when installed; the status line
+reports, per market, how far behind Binance's event time processing runs
+(lag) and the book levels processed per second. If lag grows, run markets
+(BOOK_MARKETS) or symbols (BOOK_SYMBOLS) in separate containers. One local book per (market, symbol), synchronised by
 Binance's rules for a local order book:
   spot     buffer events; REST snapshot (limit 5000); retry if
            lastUpdateId < first buffered U; drop events with u <= lastUpdateId;
@@ -82,13 +88,20 @@ import sys
 import time
 from datetime import datetime, timezone
 
+try:                                        # 2-4x faster than json on large depth messages
+    import orjson
+    _loads = orjson.loads
+except ImportError:                         # pragma: no cover
+    _loads = json.loads
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
                     format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("book_stream")
 
-SYMBOLS = ("ETHUSDT", "BTCUSDT")
+SYMBOLS = tuple(s.strip().upper() for s in
+                os.getenv("BOOK_SYMBOLS", "ETHUSDT,BTCUSDT").split(",") if s.strip())
 WIDTHS = {"ETHUSDT": 2.0, "BTCUSDT": 50.0}
 MARKETS = {
     "spot": {"ws": os.getenv("SPOT_WS", "wss://stream.binance.com:9443/stream"),
@@ -103,7 +116,10 @@ GRID_PCT = 3.0
 FLUSH_SECONDS = int(os.getenv("BOOK_FLUSH_SECONDS", "60"))
 RESYNC_SECONDS = int(os.getenv("BOOK_RESYNC_SECONDS", str(24 * 3600)))
 TRADE_SILENCE = int(os.getenv("BOOK_TRADE_SILENCE", "120"))
-CODE_VERSION = "2026-10-15"
+STATUS_SECONDS = int(os.getenv("BOOK_STATUS_SECONDS", "600"))
+WS_MAX_QUEUE = int(os.getenv("BOOK_WS_MAX_QUEUE", "512"))   # absorb short bursts
+CODE_VERSION = "2026-10-27"
+METRICS: dict = {}                          # market -> lag / load counters since last status
 CHECK_SECONDS = int(os.getenv("BOOK_CHECK_SECONDS", "900"))
 # exact-check mismatches tolerated; above this in two consecutive checks -> resync
 CHECK_TOLERANCE = int(os.getenv("BOOK_CHECK_TOLERANCE", "0"))
@@ -121,15 +137,16 @@ CREATE TABLE IF NOT EXISTS ws_book_1m (
     hi DOUBLE PRECISION, lo DOUBLE PRECISION, trade_usd DOUBLE PRECISION,
     off_grid_usd DOUBLE PRECISION, events INT, resyncs INT,
     synced_frac DOUBLE PRECISION, snap_lo DOUBLE PRECISION,
-    snap_hi DOUBLE PRECISION,
+    snap_hi DOUBLE PRECISION, trade_gap_s REAL,
     PRIMARY KEY (market, symbol, minute));
+ALTER TABLE ws_book_1m ADD COLUMN IF NOT EXISTS trade_gap_s REAL;
 """
 
 ROW_COLS = ("market", "symbol", "minute", "mid", "best_bid", "best_ask", "width",
             "base", "rest_bid", "rest_ask", "add_bid", "add_ask", "rem_bid",
             "rem_ask", "trd_bid", "trd_ask", "hi", "lo", "trade_usd",
             "off_grid_usd", "events", "resyncs", "synced_frac", "snap_lo",
-            "snap_hi")
+            "snap_hi", "trade_gap_s")
 
 
 def bucket_of(price: float, width: float) -> int:
@@ -153,6 +170,7 @@ class Book:
         self.snap_lo = self.snap_hi = None
         self.synced_at = 0.0
         self.resyncs_total = 0
+        self.trades_up = False                  # set by the market runner
         self._reset_flows()
 
     # ----------------------------------------------------------- flows
@@ -166,6 +184,7 @@ class Book:
         self.events = 0
         self.resyncs = 0
         self.synced_time = 0.0
+        self.trade_gap = 0.0
         self.window_start = time.time()
         self._last_tick = self.window_start
 
@@ -179,6 +198,8 @@ class Book:
         now = time.time()
         if self.synced:
             self.synced_time += now - self._last_tick
+            if not self.trades_up:
+                self.trade_gap += now - self._last_tick
         self._last_tick = now
 
     # ------------------------------------------------------------ sync
@@ -316,7 +337,8 @@ class Book:
                    arr["rest_bid"], arr["rest_ask"], arr["add_bid"], arr["add_ask"],
                    arr["rem_bid"], arr["rem_ask"], arr["trd_bid"], arr["trd_ask"],
                    self.hi, self.lo, self.trade_usd, off, self.events,
-                   self.resyncs, synced_frac, self.snap_lo, self.snap_hi)
+                   self.resyncs, synced_frac, self.snap_lo, self.snap_hi,
+                   round(self.trade_gap, 1))
         self._reset_flows()
         return row
 
@@ -401,14 +423,21 @@ class MarketRunner:
         self.pending: set[str] = set()
         self.trades_up = False          # set by the first trade; cleared by silence/drop
         self.last_trade = 0.0
+        self.trade_ws = None            # the connection carrying this market's trades
+        METRICS[name] = dict(lag_max=0.0, lag_sum=0.0, n=0, levels=0, t0=time.time())
+
+    def set_trades(self, up: bool):
+        self.trades_up = up
+        for sym in SYMBOLS:
+            book = self.books[(self.name, sym)]
+            book.tick()                         # close the running interval first
+            book.trades_up = up
 
     def trades_lost(self, why: str):
         if self.trades_up:
-            logger.warning("%s trade stream lost (%s): books resync once trades return",
-                           self.name, why)
-        self.trades_up = False
-        for sym in SYMBOLS:
-            self.books[(self.name, sym)].desync(f"trade stream lost: {why}")
+            logger.warning("%s trade feed lost (%s): depth stays synced; minutes are "
+                           "marked with trade_gap_s until trades return", self.name, why)
+        self.set_trades(False)
 
     async def snapshot(self, sym: str):
         """Fetch a snapshot until the book syncs (or the connection drops)."""
@@ -417,8 +446,6 @@ class MarketRunner:
         self.pending.add(sym)
         book = self.books[(self.name, sym)]
         try:
-            while not self.trades_up:                 # never sync without trades
-                await asyncio.sleep(1.0)
             for attempt in range(20):
                 await asyncio.sleep(0.5 if attempt == 0 else min(5.0, 0.5 * attempt))
                 try:
@@ -447,11 +474,21 @@ class MarketRunner:
         await asyncio.gather(*tasks)
 
     async def watch_trades(self):
-        """ETH and BTC trade many times a second: silence means a dead feed."""
+        """ETH and BTC trade many times a second: silence means a dead feed.
+        Drop and reopen the trade connection (an open but stalled socket is
+        the usual cause); repeat every TRADE_SILENCE seconds while silent."""
+        last_kick = time.time()                       # grace period at start-up
         while True:
-            await asyncio.sleep(15)
-            if self.trades_up and time.time() - self.last_trade > TRADE_SILENCE:
+            await asyncio.sleep(min(15, TRADE_SILENCE))
+            now = time.time()
+            quiet = now - max(self.last_trade, last_kick)
+            if quiet > TRADE_SILENCE:
                 self.trades_lost(f"no trade for {TRADE_SILENCE}s")
+                last_kick = now
+                ws = self.trade_ws
+                if ws is not None:
+                    logger.warning("%s reopening the trade connection", self.name)
+                    asyncio.create_task(ws.close())
 
     async def _conn(self, base: str, depth: bool, trades: bool):
         import websockets
@@ -467,21 +504,31 @@ class MarketRunner:
         while True:
             try:
                 async with websockets.connect(url, ping_interval=20, ping_timeout=60,
-                                              max_size=None, open_timeout=20) as ws:
+                                              max_size=None, open_timeout=20,
+                                              max_queue=WS_MAX_QUEUE) as ws:
                     logger.info("%s connected (%s)", self.name, what)
                     backoff = 1.0
+                    if trades:
+                        self.trade_ws = ws
                     if depth:
                         for sym in SYMBOLS:
                             self.books[(self.name, sym)].desync("connect")
                             asyncio.create_task(self.snapshot(sym))
+                    met = METRICS[self.name]
                     async for msg in ws:
-                        m = json.loads(msg)
+                        m = _loads(msg)
                         d = m.get("data", m)
                         sym = d.get("s")
                         book = self.books.get((self.name, sym))
                         if book is None:
                             continue
                         if d.get("e") == "depthUpdate":
+                            lag = time.time() - d.get("E", 0) / 1000.0
+                            if 0 <= lag < 3600:
+                                met["lag_sum"] += lag
+                                met["n"] += 1
+                                met["lag_max"] = max(met["lag_max"], lag)
+                            met["levels"] += len(d.get("b", ())) + len(d.get("a", ()))
                             book.on_depth(d)
                             if book.synced and time.time() - book.synced_at > RESYNC_SECONDS:
                                 book.desync("scheduled")
@@ -490,7 +537,7 @@ class MarketRunner:
                         elif d.get("e") == "aggTrade":
                             self.last_trade = time.time()
                             if not self.trades_up:
-                                self.trades_up = True
+                                self.set_trades(True)
                                 logger.info("%s trades arriving", self.name)
                             book.on_trade(d)
             except asyncio.CancelledError:
@@ -499,6 +546,7 @@ class MarketRunner:
                 logger.warning("%s %s connection lost: %s — reconnecting in %.0fs",
                                self.name, what, e, backoff)
             if trades:
+                self.trade_ws = None
                 self.trades_lost("connection closed")
             if depth:
                 for sym in SYMBOLS:
@@ -554,12 +602,20 @@ async def flusher(books: dict, writer: Writer):
             tz=timezone.utc)
         rows = [r for b in books.values() if (r := b.flush(minute)) is not None]
         await asyncio.to_thread(writer.write, rows)
-        if int(time.time() // FLUSH_SECONDS) % max(1, 600 // FLUSH_SECONDS) == 0:
+        if int(time.time() // FLUSH_SECONDS) % max(1, STATUS_SECONDS // FLUSH_SECONDS) == 0:
             logger.info("status: " + "; ".join(
                 f"{m}/{s} {'synced' if b.synced else 'SYNCING'} "
                 f"{len(b.bids)}b/{len(b.asks)}a resyncs={b.resyncs_total} "
                 f"trades={b.trades_total - b.trades_at_status}"
+                f"{'' if b.trades_up else ' NO-TRADE-FEED'}"
                 for (m, s), b in books.items()))
+            now = time.time()
+            for m, met in METRICS.items():
+                span = max(1e-9, now - met["t0"])
+                logger.info("load %s: lag avg %.2fs max %.1fs, %s levels/s", m,
+                            met["lag_sum"] / max(1, met["n"]), met["lag_max"],
+                            f"{met['levels'] / span:,.0f}")
+                met.update(lag_max=0.0, lag_sum=0.0, n=0, levels=0, t0=now)
             for b in books.values():
                 b.trades_at_status = b.trades_total
 
